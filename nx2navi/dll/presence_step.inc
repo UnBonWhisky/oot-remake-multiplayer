@@ -26,6 +26,7 @@ struct PresenceBox {
     std::uint64_t next_ms = 0;
     std::vector<std::uint64_t> due;  // entities whose "became absent" call is to be made
     std::unordered_set<std::uint32_t> gates;
+    std::size_t gated_seen = ~std::size_t{0};
 };
 PresenceBox g_presence;
 constexpr int kPresenceOrder = 60;
@@ -71,6 +72,8 @@ std::optional<CoopPuppet::Call> PresenceStep(CoopPuppet::Guest& guest, bool afte
     const std::uint64_t head = lists + 0x670;
     GuestFlags memory(guest, main);
     coop::host::GameFlags flags(memory);
+    std::size_t gated = 0, with_flag = 0;
+    std::string gated_names;
     std::uint64_t node = word(head);
     for (int walked = 0; node != 0 && node != head && walked < 4096; ++walked, node = word(node)) {
         const std::uint64_t actor = word(node + 0x10);
@@ -79,11 +82,20 @@ std::optional<CoopPuppet::Call> PresenceStep(CoopPuppet::Guest& guest, bool afte
         }
         const std::uint64_t entity = word(actor + Presence::kActorEntity);
         std::uint32_t flag = 0, bits = 0, absent = 0;
+        if (entity != 0 && u32at(entity + Presence::kEntityFlag, flag) && flag != 0) {
+            ++with_flag;
+        }
         if (entity == 0 || !u32at(entity + Presence::kEntityFlag, flag) || flag == 0 || !v.gates.contains(flag) ||
             !u32at(entity + Presence::kEntityBits, bits) || !u32at(entity + Presence::kEntityAbsent, absent)) {
             continue;
         }
         const auto value = flags.get_bool(flag);
+        ++gated;
+        if (gated_names.size() < 400) {
+            const auto* g = CoopStory::Find(flag);
+            gated_names += " " + ActorNameOf(guest, actor) + "(" + (g != nullptr ? g->name : "?") + "=" +
+                           (value ? std::to_string(*value ? 1 : 0) : std::string("?")) + ")";
+        }
         if (!value || !Presence::ShouldLeave(bits, absent, *value)) {
             continue;
         }
@@ -103,5 +115,11 @@ std::optional<CoopPuppet::Call> PresenceStep(CoopPuppet::Guest& guest, bool afte
             g_presence_left.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    if (gated != v.gated_seen) {
+        v.gated_seen = gated;
+        LOG_INFO(Core, "coop: presence: {} loaded actors have a presence flag, {} of them a shared story gate:{}",
+                 with_flag, gated, gated_names);
+    }
     return std::nullopt;
 }
+

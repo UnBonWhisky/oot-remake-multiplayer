@@ -679,6 +679,8 @@ private:
             // Another player's Ocarina: a notice when their notes make a song (ocarina_song.hpp).
             if (const auto* note = std::get_if<coop::protocol::OcarinaNote>(&event.message);
                 note != nullptr && note->player_number != 0 && note->player_number < song_ears_.size()) {
+                g_log.Line("ocarina: P%u's note %u (%s)", note->player_number, note->note,
+                           note->note != 0 ? CoopOcarinaSound::AssetName(note->note).c_str() : "let go");
                 if (const auto* song = song_ears_[note->player_number].Note(note->note, SteadyUs())) {
                     const std::string line =
                         CoopNx2navi::OcarinaSong::Notice(Name(note->player_number), *song, CoopNx2navi::Ui::French());
