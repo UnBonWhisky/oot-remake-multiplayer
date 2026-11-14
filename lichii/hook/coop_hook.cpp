@@ -28,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <fmt/format.h>
@@ -423,6 +424,7 @@ public:
             if (sharing_ && load_mend_.ready() && CoopStory::On() &&
                 quest_catch_up_.Due(CoopEvery::NowUs())) {
                 CatchUpQuests(*memory);  // issue 173: Impa comes for every player
+                MendOwnedHorse(*memory);  // Epona for every adult once one won her
             }
             if (sharing_) {
                 // A small key or token we and another player took at once: ours
@@ -1587,6 +1589,10 @@ private:
     // Shared story cutscenes (coop_shared_scenes.h).
     bool shared_scenes_ = false;  // LICHII_COOP_SHARED_CUTSCENES, needs live events
     CoopSharedScenes::Joiner shared_joiner_;
+#if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
+    CoopEvery::Every played_watch_{CoopEvery::kSecondUs};
+    std::unordered_map<std::string, std::uint64_t> played_seen_;  // shared scene -> when its flag was first seen set
+#endif
     CoopLiveEvents::StartWatch story_watch_;  // our own story cutscene starts
     std::vector<coop::protocol::DungeonEvent> story_events_in_;  // under dungeon_events_mutex_  // deku-dungeon-2: our own gimmick event starts
     std::mutex dungeon_events_mutex_;         // DUNGEON_EVENT from the network thread
@@ -1691,11 +1697,43 @@ private:
                 });
             }
         }
+#if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
+        // A scene's HavePlayedEvent flag is shared too, and the starter's game sets it as the scene
+        // begins: it can reach us with (or before) the start, and the scene then counted as "played
+        // already" here. So the flags of the shared scenes are watched once a second, and a scene
+        // whose flag was first seen set less than kFreshUs before its start came is still joined.
+        if (memory && played_watch_.Due(now_us)) {
+            coop::host::GameFlags flags(*memory);
+            for (const std::string_view n : CoopSharedScenes::Names()) {
+                const auto v = flags.get_bool(coop::host::flag_hash("HavePlayedEvent." + std::string(n)));
+                if (!v) continue;
+                if (*v) {
+                    played_seen_.try_emplace(std::string(n), now_us);
+                } else {
+                    played_seen_.erase(std::string(n));
+                }
+            }
+        }
+        const auto name = shared_joiner_.Next(here, [&](const std::string& n, std::uint64_t at_us) {
+            constexpr std::uint64_t kFreshUs = 2'500'000;
+            const bool played = memory && coop::host::GameFlags(*memory)
+                                              .get_bool(coop::host::flag_hash("HavePlayedEvent." + n))
+                                              .value_or(false);
+            if (!played) return false;
+            const auto it = played_seen_.find(n);
+            if (it == played_seen_.end()) {
+                played_seen_.emplace(n, now_us);
+                return at_us > now_us + kFreshUs;  // first seen now: set with the start, not before it
+            }
+            return it->second + kFreshUs < at_us;
+        });
+#else
         const auto name = shared_joiner_.Next(here, [&](const std::string& n) {
             return memory && coop::host::GameFlags(*memory)
                                  .get_bool(coop::host::flag_hash("HavePlayedEvent." + n))
                                  .value_or(false);
         });
+#endif
         for (const auto& line : shared_joiner_.TakeNotes()) {
             LOG_INFO(Core, "coop: cutscene: {}", line);
         }
@@ -1720,6 +1758,40 @@ private:
                 LOG_INFO(Core, "coop: story: quest {} {:#x} -> {:#x} (shared story; issue 173)",
                          quest.name, *was, *raise);
             }
+        }
+    }
+
+    // docs/flags.md, "Epona: the owned horse": a Get_Epona at Complete that
+    // came from another player owns no horse here, so Epona's Song did
+    // nothing; write the owned horse's name as the race's win would.
+    bool owned_horse_on_ = CoopQuests::OwnedHorseOn();
+    bool owned_horse_logged_ = false;
+    std::string owned_horse_seen_;
+    void MendOwnedHorse(EmulatorMemory& memory) {
+        if (!owned_horse_on_) {
+            return;
+        }
+        namespace ep = CoopQuests::epona;
+        coop::host::GameFlags flags(memory);
+        const auto owned = flags.get_string64_array(ep::kOwnedActor, 0);
+        const auto quest = flags.get_enum(ep::kQuest);
+        const auto child = flags.get_bool(ep::kChildhood);
+        const std::string seen = fmt::format("{:#x} {} '{}'", quest.value_or(0), child ? (*child ? 1 : 0) : -1,
+                                             owned.value_or("(unread)"));
+        if (seen != owned_horse_seen_) {
+            owned_horse_seen_ = seen;
+            LOG_INFO(Core, "coop: quests: Get_Epona / childhood / owned horse: {}", seen);
+        }
+        const auto want = CoopQuests::OwnedHorseMend(quest, child, owned);
+        if (!want) {
+            return;
+        }
+        if (coop::host::GameFlags::set_string64_array_now(memory, ep::kOwnedActor, 0, *want)) {
+            LOG_INFO(Core, "coop: quests: Get_Epona is Complete here: our owned horse is now '{}' (Epona's Song calls her)",
+                     *want);
+        } else if (!owned_horse_logged_) {
+            owned_horse_logged_ = true;
+            LOG_WARNING(Core, "coop: quests: could not write the owned horse '{}'", *want);
         }
     }
 

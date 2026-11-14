@@ -28,6 +28,9 @@
 #include "save_sync.hpp"
 #include "settings.hpp"
 #include "step_switch.hpp"
+#include "presence.hpp"
+#include "talk_lock.hpp"
+#include "ocarina_song.hpp"
 #include "item_get.hpp"
 #include "teleport_auto.hpp"
 
@@ -2355,4 +2358,124 @@ TEST_CASE("gear sounds: a footstep and its variation values survive the message,
     CHECK(Fx::HasVariations("FootStep"));
     CHECK(Fx::HasVariations("EquipmentNoise_FootStep"));
     CHECK_FALSE(Fx::HasVariations("SwordAttack_S_01"));
+}
+
+// ------------------------------- a story gate opened elsewhere leaves at once (presence.hpp)
+
+TEST_CASE("presence: a gate whose flag went to 0 leaves, once, and only what the game has not taken out") {
+    using namespace Presence;
+    // The Kokiri exit wall: present while its blocker flag is set (no negation).
+    CHECK(PresentNow(0x0, true));
+    CHECK_FALSE(PresentNow(0x0, false));
+    CHECK(ShouldLeave(0x0, 0x0, false));            // flag 0, still there: leave
+    CHECK_FALSE(ShouldLeave(0x0, 0x0, true));       // flag still 1: stays
+    CHECK_FALSE(ShouldLeave(0x0, kAbsentPresence, false));  // the game already marked it absent
+    // A negated gate (present while the flag is NOT set).
+    CHECK(ShouldLeave(kBitNegation, 0x0, true));
+    CHECK_FALSE(ShouldLeave(kBitNegation, 0x0, false));
+    // Lazy bit (0x4) does not change the answer.
+    CHECK(ShouldLeave(0x4, 0x0, false));
+    // The "became absent" call only when no other reason was set before our OR.
+    CHECK(CallDue(0x0));
+    CHECK_FALSE(CallDue(0x80));
+    CHECK_FALSE(CallDue(0x800000));
+    CHECK(CallDue(0x4));  // a bit outside the game's mask
+}
+
+// ------------------------------- one talker per NPC (talk_lock.hpp)
+
+TEST_CASE("talk lock: a second player's talk to the same NPC is refused while the first talks") {
+    using namespace CoopNx2navi::TalkLock;
+    const Note n{"KokiriForest_Child", 0x1234567890abcdefull, true};
+    const auto back = Decode(Encode(n));
+    REQUIRE(back);
+    CHECK(back->hash == n.hash);
+    CHECK(back->scene == n.scene);
+    CHECK(back->talking);
+    CHECK_FALSE(Decode({}));
+    CHECK(Refusal("Saria", false) == "Saria is already talking to this NPC");
+    CHECK(Refusal("Saria", true) == "Saria parle d\xc3\xa9j\xc3\xa0 \xc3\xa0 ce personnage");
+
+    Lock b;  // the second player's game
+    b.SetScene("KokiriForest_Child");
+    b.Remote(1, n, 1'000'000);
+    CHECK(b.Request(n.hash, 1'500'000) == 1);         // refused: P1 talks to it
+    CHECK(b.TakeRefusals() == std::vector<std::uint8_t>{1});
+    CHECK(b.Request(n.hash, 1'600'000) == 1);          // still refused, no second line within a second
+    CHECK(b.TakeRefusals().empty());
+    CHECK(b.Request(0x99, 1'700'000) == 0);            // another NPC: free
+    b.Event(false, 1'700'000 + kStartUs + 1);          // that talk never started
+    CHECK(b.Talking() == 0);
+    b.Remote(1, Note{n.scene, n.hash, false}, 2'000'000);  // P1 ended
+    CHECK(b.Request(n.hash, 2'100'000) == 0);
+    b.Remote(1, n, 3'000'000);
+    b.SetScene("HyruleField");                          // another scene forgets it
+    b.Remote(2, Note{"KokiriForest_Child", 7, true}, 3'000'000);
+    CHECK(b.Request(7, 3'100'000) == 0);
+    CHECK(b.Request(n.hash, 3'100'000) == 0);
+
+    Lock a;  // the first player's game: says its talk, again every 2 s, and 0 at its end
+    a.SetScene("KokiriForest_Child");
+    CHECK(a.Request(n.hash, 10'000'000) == 0);
+    auto sends = a.TakeSends(10'000'000);
+    REQUIRE(sends.size() == 1);
+    CHECK(sends[0].talking);
+    a.Event(true, 10'100'000);
+    CHECK(a.TakeSends(11'000'000).empty());
+    CHECK(a.TakeSends(12'100'000).size() == 1);
+    a.Event(false, 13'000'000);
+    sends = a.TakeSends(13'000'000);
+    REQUIRE(sends.size() == 1);
+    CHECK_FALSE(sends[0].talking);
+    CHECK(a.Talking() == 0);
+    // A held note runs out by itself.
+    Lock c;
+    c.SetScene("S");
+    c.Remote(3, Note{"S", 5, true}, 0);
+    CHECK(c.Request(5, kHoldUs - 1) == 3);
+    CHECK(c.Request(5, kHoldUs + 1) == 0);
+}
+
+TEST_CASE("overlay: another player's quest step becomes a notice line") {
+    using CoopNx2navi::Ui::QuestNotice;
+    CHECK(QuestNotice("quests: Get_Epona ReadyForGambleRace -> Complete (shared Threads of Time; issue 193)", false) ==
+          std::optional<std::string>("Quest Get_Epona: Complete"));
+    CHECK(QuestNotice("quests: Meet_DekuTree Ready -> Step02 (shared Threads of Time; issue 193)", true) ==
+          std::optional<std::string>("Qu\xc3\xaate Meet_DekuTree : Step02"));
+    CHECK_FALSE(QuestNotice("quests: sharing 12 quests (Threads of Time, and Epona won)", false));
+    CHECK_FALSE(QuestNotice("quests: Get_Epona / childhood / owned horse: 0x0 0 ''", false));
+    CHECK_FALSE(QuestNotice("story: quest DoorOfTime 0x1 -> 0x2 (shared story; issue 173)", false));
+}
+
+TEST_CASE("ocarina song: another player's notes make a song notice") {
+    using namespace CoopNx2navi::OcarinaSong;
+    Listener ear;
+    const std::uint8_t epona[] = {D2, B, A, D2, B, A};
+    const Song* got = nullptr;
+    std::uint64_t t = 1'000'000;
+    ear.Note(D, t);  // a stray note first
+    for (const std::uint8_t n : epona) {
+        CHECK(got == nullptr);
+        ear.Note(0, t);  // let go: no note
+        got = ear.Note(n, t += 400'000);
+    }
+    REQUIRE(got != nullptr);
+    CHECK(std::string(got->en) == "Epona's Song");
+    CHECK(Notice("Host", *got, false) == "Host played Epona's Song");
+    CHECK(Notice("Host", *got, true) == "Host a jou\xc3\xa9 le Chant d'Epona");
+    // A long pause starts a new tune.
+    Listener e2;
+    for (int i = 0; i < 3; ++i) e2.Note(epona[i], t += 400'000);
+    t += 7'000'000;
+    const Song* none = nullptr;
+    for (int i = 3; i < 6; ++i) none = e2.Note(epona[i], t += 400'000);
+    CHECK(none == nullptr);
+    // Every song is told apart.
+    for (const Song& s : Songs()) {
+        Listener e;
+        const Song* r = nullptr;
+        for (const auto n : s.notes) r = e.Note(n, t += 100'000);
+        REQUIRE(r != nullptr);
+        CHECK(std::string(r->en) == s.en);
+    }
 }

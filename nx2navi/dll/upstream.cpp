@@ -11,7 +11,10 @@
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "common/logging.h"
@@ -24,6 +27,9 @@
 #include "coop_puppet.h"
 #include "coop_pose.h"
 #include "coop_world.h"
+#include "coop_story.h"
+#include "coop/host/game_flags.hpp"
+#include "presence.hpp"
 #include "coop_puppet_config.h"
 #include "coop_puppet_sound.h"
 #include "coop_runtime.h"
@@ -769,6 +775,7 @@ void OnSignGate(Nx2HookCall* call, void*) {
 }
 
 #include "item_get_step.inc"
+#include "presence_step.inc"
 
 // --- Floor switches pressed by any player are down in every game (step_switch.hpp) ---
 // The step switch's selector `SelectorSwitchStepBootup` (evaluate main+0x11a4920, x0 = the node): [node+0x58]
@@ -806,6 +813,30 @@ void OnStepSelector(Nx2HookCall* call, void*) {
     std::uint8_t current = 0xff, on = 0xfe;
     if (api->read(node + 0x1e, &current, 1) == 1 && api->read(node + 0x68, &on, 1) == 1) {
         g_switches.Seen(hash, current == on, now);
+    }
+}
+
+// --- One talker per NPC (talk_lock.hpp) ---
+TalkLock::Lock g_talk;
+std::atomic<bool> g_talk_on{false};
+void OnTalkRequest(Nx2HookCall* call, void*) {
+    const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
+    if (api == nullptr || static_cast<std::uint32_t>(call->x[1]) != 2) {  // 2: OnPlayerTalk
+        return;
+    }
+    auto word = [api](std::uint64_t at) {
+        std::uint64_t v = 0;
+        return at >= 0x10000 && api->read(at, &v, 8) == 1 ? v : 0;
+    };
+    const std::uint64_t owner = word(call->x[0] + 0x18);
+    const std::uint64_t placement = owner != 0 ? word(owner + 0x3d8) : 0;
+    const std::uint64_t hash = placement != 0 ? word(placement + 0x88) : 0;
+    if (hash == 0 || hash == ~std::uint64_t{0}) {
+        return;
+    }
+    if (g_talk.Request(hash, SteadyUs()) != 0) {
+        call->skip = 1;
+        call->x[0] = 0;  // no event asked: the talk does not start
     }
 }
 
@@ -916,6 +947,7 @@ void Configure(const Settings& s, const std::filesystem::path& mod_folder, void 
     }
     // This port's own rules in the shared enemies' code (lichii/hook/coop_objects_sync.h).
     CoopObjects::ShareFriendly(s.objects_friendly);
+    CoopObjects::ShareNpcs(s.objects_npcs);
     {
         const char* slots = std::getenv("OOT_COOP_ENEMY_SLOTS");
         CoopObjects::EnemySlots(slots == nullptr || std::string_view(slots) != "0");
@@ -954,6 +986,10 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
     });
     CoopCallers::Add(kVoiceOrder, VoiceStep);
     CoopCallers::Add(kItemOrder, ItemStep);
+    if (const char* e = std::getenv("OOT_COOP_PRESENCE"); e != nullptr && std::string_view(e) == "0") {
+        g_presence_on = false;
+    }
+    CoopCallers::Add(kPresenceOrder, PresenceStep);
     {
         const char* e = std::getenv("OOT_COOP_DEBUG_OWN_SOUNDS");
         g_own_debug = e != nullptr ? std::atoi(e) : 0;
@@ -981,6 +1017,9 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
             api->hook_function(main_base + at, OnSignTrace, nullptr);
         }
     }
+    if (const char* e = std::getenv("OOT_COOP_TALK_LOCK"); e == nullptr || std::string_view(e) != "0") {
+        g_talk_on = api->hook_function(main_base + 0xbd1670, OnTalkRequest, nullptr) > 0;
+    }
     if (const char* e = std::getenv("OOT_COOP_SWITCHES"); e == nullptr || std::string_view(e) != "0") {
         g_switches_on = api->hook_function(main_base + 0x11a4920, OnStepSelector, nullptr) > 0;
     }
@@ -1002,6 +1041,7 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
 bool SendChat(const std::string& text) { return g_on && CoopHook::SendChat(text); }
 
 StepSwitch::Switches* Switches() { return g_switches_on.load() ? &g_switches : nullptr; }
+TalkLock::Lock* Talk() { return g_talk_on.load() ? &g_talk : nullptr; }
 void AskItemScene(const std::string& actor, const std::array<float, 3>& at) {
     std::lock_guard lock(g_item.mutex);
     g_item.scene = std::make_pair(actor, at);
@@ -1012,6 +1052,7 @@ void AskFanfare(int type) {
 }
 int TakeItemDone() { return g_item_done.exchange(0); }
 void NoteEvent(bool event) { g_item_event = event; }
+void NoteInGame(bool in_game) { g_presence_in_game = in_game; }
 std::uint64_t SwitchCalls() { return g_switch_calls.load(std::memory_order_relaxed); }
 
 void PuppetSound(std::uint8_t player, const std::string& asset,
@@ -1242,6 +1283,11 @@ void Log(const std::string& line) {
     }
     if (text.rfind("notice: ", 0) == 0) {  // "Saria got the Hookshot", "Mido opened a chest"
         Overlay::Notice(std::string(text.substr(8)));
+    }
+    // Another player's quest step that reached us ("quests: Get_Epona ReadyForGambleRace -> Complete (shared
+    // Threads of Time; ...)"): a notice line with the quest and its new step.
+    if (const auto line = CoopNx2navi::Ui::QuestNotice(text, CoopNx2navi::Ui::French())) {
+        Overlay::Notice(*line);
     }
 }
 bool PadButtons(std::uint64_t&) {

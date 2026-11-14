@@ -67,6 +67,10 @@ struct Settings {
     // the file says 1: their copies are not held, so a player could not talk
     // to, ride or milk one another game owns; each game runs its own.
     bool objects_friendly = false;
+    // objects_npcs = 0: townspeople are each game's own too. On (with objects_friendly off): townspeople (Npc_)
+    // are shared, so they stand and walk at the same place in every game, but not the animals and not the NPCs
+    // that act for one player (the owl, Zelda, Ruto, the blockers, ...: CoopObjects::IsOwnNpc).
+    bool objects_npcs = true;
     // objects_rolls_apart = <metres>, 0 to 200: a game that does not decide the
     // scene's rolled enemies (the night's Stalchildren) keeps and shares its
     // own when the deciding player's Link is further than this from them, so a

@@ -22,6 +22,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace CoopSharedScenes {
@@ -48,8 +49,15 @@ inline constexpr float kRoomM = 30.0f;
 inline constexpr float kNoRoomM = 8.0f;
 // How long a start waits while our game cannot take it (our own event, a
 // menu, a pause, a load) before it is skipped: a cutscene joined later than
-// this would be far behind the starter's.
+// this would be far behind the starter's. A build may set it
+// (LICHII_COOP_SHARED_SCENE_JOIN_US; the NX2navi build waits longer, so a
+// player who was in a talk, a menu or the item-get scene when another player's
+// story cutscene began still gets it, as the item-get scene waits its turn).
+#ifdef LICHII_COOP_SHARED_SCENE_JOIN_US
+inline constexpr std::uint64_t kJoinUs = LICHII_COOP_SHARED_SCENE_JOIN_US;
+#else
 inline constexpr std::uint64_t kJoinUs = 3'000'000;
+#endif
 
 using Vec3 = std::array<float, 3>;
 
@@ -81,7 +89,15 @@ public:
     std::optional<std::string> Next(const Here& here, Played&& played) {
         Visit(here.scene);
         while (!pending_.empty()) {
-            const std::string why = Why(pending_.front(), here, played(pending_.front().name));
+            // `played` may also take when the start came (at_us), to tell a scene this save
+            // had played before from one whose flag just came with the start (a build's choice).
+            bool was_played = false;
+            if constexpr (std::is_invocable_v<Played&, const std::string&, std::uint64_t>) {
+                was_played = played(pending_.front().name, pending_.front().at_us);
+            } else {
+                was_played = played(pending_.front().name);
+            }
+            const std::string why = Why(pending_.front(), here, was_played);
             if (why == "wait") {
                 return std::nullopt;
             }

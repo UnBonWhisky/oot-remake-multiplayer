@@ -63,6 +63,9 @@ class GameFlags {
   // game's queue is not seen until the game applies it. Nothing when the
   // text is not 0-terminated within its buffer or not printable ASCII.
   std::optional<std::string> get_string64(std::uint32_t hash);
+  // Element `index` of a String64Array flag (type 17; for example
+  // OwnedHorseList.ActorName). Same rules as get_string64.
+  std::optional<std::string> get_string64_array(std::uint32_t hash, std::uint32_t index);
 
   // Queues a write as the game's setter does. False when the flag is
   // unknown, the queue is full, the game applied the queue while this was
@@ -79,6 +82,12 @@ class GameFlags {
   // not fit (at most 63 bytes, printable ASCII).
   static bool set_string64_now(WritableGameMemory& memory, std::uint32_t hash,
                                std::string_view text);
+
+  // Writes element `index` of a String64Array flag straight into its buffer,
+  // like set_string64_now (the game has no queue for it; the owned horse,
+  // docs/flags.md "Epona"). False when unknown or the text does not fit.
+  static bool set_string64_array_now(WritableGameMemory& memory, std::uint32_t hash,
+                                     std::uint32_t index, std::string_view text);
 
   // Which typed table (the save type ids, 0 to 25) holds `hash`, for finding
   // a flag's type. Nothing when none does.

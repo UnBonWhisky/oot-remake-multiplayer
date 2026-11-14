@@ -38,6 +38,7 @@
 #include "puppet_fx.hpp"
 #include "settings.hpp"
 #include "step_switch.hpp"
+#include "talk_lock.hpp"
 
 struct Nx2PluginApi;
 
@@ -72,12 +73,15 @@ void PuppetSound(std::uint8_t player, const std::string& asset,
                  std::vector<std::pair<std::uint8_t, std::uint32_t>> props = {});
 // Floor switches (step_switch.hpp): null when the hook is off (OOT_COOP_SWITCHES=0) or was refused.
 StepSwitch::Switches* Switches();
+// One talker per NPC (talk_lock.hpp): null when the hook is off (OOT_COOP_TALK_LOCK=0) or was refused.
+TalkLock::Lock* Talk();
 std::uint64_t SwitchCalls();  // calls of the switch selector seen (status line)
 // The item-get moment (item_get.hpp): the game's get scene for this item actor beside our Link, or its fanfare.
 void AskItemScene(const std::string& actor, const std::array<float, 3>& at);
 void AskFanfare(int type);
 int TakeItemDone();          // 0 nothing, 1 the scene played, 2 it failed
 void NoteEvent(bool event);  // our Link is in an event (each frame)
+void NoteInGame(bool in_game);  // our Link is read (each frame): not the title screen or a load
 // A player was struck: their puppet's model turns red for a moment as the game's own Link does
 // (puppet_fx.hpp). Any thread.
 void PuppetHurt(std::uint8_t player);

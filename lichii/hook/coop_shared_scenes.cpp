@@ -145,7 +145,13 @@ std::string Joiner::Why(const Pending& p, const Here& here, bool played) const {
         }
     }
     if (!here.can_start || !here.link || here.scene.empty()) {
-        return here.now_us >= p.at_us + kJoinUs ? "our game was busy for 3 s" : "wait";
+        if (here.now_us >= p.at_us + kJoinUs) {
+            char text[64];
+            std::snprintf(text, sizeof text, "our game was busy for %llu s",
+                          static_cast<unsigned long long>(kJoinUs / 1'000'000));
+            return text;
+        }
+        return "wait";
     }
     return "";
 }

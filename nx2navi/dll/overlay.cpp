@@ -1014,6 +1014,14 @@ void Notice(std::string text, bool chat) {
     Ui::AddNotice(g.notices, std::move(text), NowMs());
 }
 
+void Banner(std::string text) {
+    std::lock_guard lock(g.mutex);
+    if (g.banners.size() < 8) {
+        g.banners.push_back(text);
+    }
+    Ui::AddNotice(g.notices, std::move(text), NowMs());
+}
+
 void Shutdown() {
     const Nx2PluginApi* api = nullptr;
     std::vector<int> gone;

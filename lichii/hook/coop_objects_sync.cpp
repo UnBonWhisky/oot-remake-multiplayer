@@ -137,6 +137,27 @@ void ShareFriendly(bool on) {
 }
 
 namespace {
+std::atomic<bool> g_share_npcs{false};
+}
+
+void ShareNpcs(bool on) {
+    g_share_npcs.store(on, std::memory_order_relaxed);
+}
+
+bool IsOwnNpc(std::string_view name) {
+    constexpr std::string_view kOwn[] = {
+        "Npc_Kaepora", "Npc_Hylia_Sheik", "Npc_Hylia_Zelda", "Npc_Hylia_Impa", "Npc_Zora_Ruto",
+        "Npc_Gerudo_Nabooru", "Npc_Goron_Darunia", "Npc_GreatFairy", "Npc_JabuJabu", "Npc_DekuTreeChild",
+        "Npc_SkullKid", "Npc_Kokiri_Saria", "Npc_Kokiri_Mido", "Npc_Kokiri_007", "Npc_Pierre", "Npc_Bonooru",
+        "Npc_Hylia_RunningMan", "Npc_Hylia_Dampe", "Npc_KotakeKoume", "Npc_DungeonBoss", "Npc_Narrator",
+        "Npc_EventStarter", "Npc_Dream", "Npc_GuidePoe", "Npc_Kakashi", "Npc_Fairy", "Npc_Animal"};
+    for (const std::string_view own : kOwn) {
+        if (name.starts_with(own)) return true;
+    }
+    return false;
+}
+
+namespace {
 std::atomic<bool> g_enemy_slots{false};
 }
 
@@ -155,7 +176,11 @@ bool IsShared(std::string_view name) {
     if (CoopEnemyShots::IsEnemyShot(name)) return false;
     if (!g_share_friendly.load(std::memory_order_relaxed) &&
         (name.starts_with("Npc_") || name.starts_with("Animal_"))) {
-        return false;  // each game its own townspeople and animals (ShareFriendly)
+        // Each game its own townspeople and animals (ShareFriendly), or with
+        // ShareNpcs the townspeople shared but the animals and IsOwnNpc not.
+        if (!g_share_npcs.load(std::memory_order_relaxed) || !name.starts_with("Npc_") || IsOwnNpc(name)) {
+            return false;
+        }
     }
     if (name.starts_with("Npc_")) {
         // Each player's own: Navi (the fairy sync has her), the equipment

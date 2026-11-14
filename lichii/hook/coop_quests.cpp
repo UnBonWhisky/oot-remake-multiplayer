@@ -171,6 +171,36 @@ void AddShared(std::optional<coop::host::SharedFlags>& shared) {
 #endif
 }
 
+std::optional<const char*> OwnedHorseMend(std::optional<std::uint32_t> quest,
+                                          std::optional<bool> childhood,
+                                          const std::optional<std::string>& owned) {
+    static const std::uint32_t kComplete = coop::host::flag_hash("Complete");
+    if (!quest || *quest != kComplete || !childhood || *childhood || !owned || !owned->empty()) {
+        return std::nullopt;
+    }
+    return epona::kActor;
+}
+
+bool OwnedHorseOn() {
+#ifndef LICHII_COOP_OWNED_HORSE_DEFAULT
+#define LICHII_COOP_OWNED_HORSE_DEFAULT 0
+#endif
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "LICHII_COOP_OWNED_HORSE") == 0 && value != nullptr) {
+        const bool on = std::string_view(value) != "0";
+        std::free(value);
+        return on;
+    }
+#else
+    if (const char* value = std::getenv("LICHII_COOP_OWNED_HORSE")) {
+        return std::string_view(value) != "0";
+    }
+#endif
+    return LICHII_COOP_OWNED_HORSE_DEFAULT != 0;
+}
+
 std::optional<coop::protocol::FlagEntry> Store::read(coop::host::FlagKey key) {
     const Quest* quest = Plain(key) ? Find(key.hash) : nullptr;
     if (quest == nullptr) {

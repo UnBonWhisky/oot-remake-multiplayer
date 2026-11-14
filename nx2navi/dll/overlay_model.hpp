@@ -107,6 +107,9 @@ inline float MagicShare(int magic, int max_magic) {
 // The panel's own texts: English, or French in a French game (the hook's notices, "Host got the
 // map", stay as the hook writes them). Any thread.
 void SetFrench(bool on);
+// The notice for a hook log line that says another player's quest step reached us ("quests: <quest> <from> -> <to>
+// (shared ..."): "Quest <quest>: <to>" ("Quête <quest> : <to>"), or nothing for any other line.
+std::optional<std::string> QuestNotice(std::string_view line, bool french);
 bool French();
 
 struct Snapshot {

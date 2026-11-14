@@ -416,3 +416,22 @@ TEST_CASE("quests: Get_Epona shares its end only") {
     CHECK(odd.store.write_exact(entry("Complete")));
     CHECK(odd.enums[kEpona] == 0xdeadbeefu);
 }
+
+TEST_CASE("quests: Epona's owned horse is written for an adult whose Get_Epona came Complete") {
+    using CoopQuests::OwnedHorseMend;
+    const std::uint32_t complete = coop::host::flag_hash("Complete");
+    const std::uint32_t racing = coop::host::flag_hash("GambleRacePlaying");
+    const std::optional<std::string> none = std::string();
+    const auto mended = OwnedHorseMend(complete, false, none);
+    REQUIRE(mended);
+    CHECK(std::string(*mended) == "Animal_Epona_Adult");
+    CHECK_FALSE(OwnedHorseMend(racing, false, none));                  // not won anywhere yet
+    CHECK_FALSE(OwnedHorseMend(complete, true, none));                 // a child owns no horse
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::string("Animal_Epona_Adult")));  // owned
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::string("Animal_Horse_A")));      // another horse kept
+    CHECK_FALSE(OwnedHorseMend(std::nullopt, false, none));            // unread
+    CHECK_FALSE(OwnedHorseMend(complete, std::nullopt, none));
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::nullopt));
+    CHECK(coop::host::flag_hash("Sequence_IsChildhood") == CoopQuests::epona::kChildhood);
+    CHECK(coop::host::flag_hash("OwnedHorseList.ActorName") == CoopQuests::epona::kOwnedActor);
+}

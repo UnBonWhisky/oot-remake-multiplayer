@@ -22,6 +22,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "coop/host/flags.hpp"
@@ -67,6 +68,31 @@ bool On();
 
 // Merge, on unless LICHII_COOP_QUESTS=0; logs what it did.
 void AddShared(std::optional<coop::host::SharedFlags>& shared);
+
+// Epona for every adult (docs/flags.md, "Epona: the owned horse"). Get_Epona
+// reaching Complete is not what lets Epona's Song call her: the song's event
+// flow asks the OwnedHorseMgr, which reads element 0 of the saved
+// String64Array OwnedHorseList.ActorName (non-empty = a horse is owned). The
+// race's win writes it (main+0x329d990, adults only). A game whose quest came
+// Complete from another player never ran that, so the hook writes the name
+// itself: our quest at Complete, adult, nothing owned yet.
+namespace epona {
+inline constexpr std::uint32_t kQuest = 0x92431c55u;       // Get_Epona
+inline constexpr std::uint32_t kOwnedActor = 0x7bde80e9u;  // OwnedHorseList.ActorName
+inline constexpr std::uint32_t kChildhood = 0xcea220d3u;   // Sequence_IsChildhood
+inline constexpr const char* kActor = "Animal_Epona_Adult";
+}  // namespace epona
+
+// The name to write into OwnedHorseList.ActorName[0], or nothing. Anything
+// unread is nothing; a horse already owned (any name) is kept.
+std::optional<const char*> OwnedHorseMend(std::optional<std::uint32_t> quest,
+                                          std::optional<bool> childhood,
+                                          const std::optional<std::string>& owned);
+
+// LICHII_COOP_OWNED_HORSE=0|1; without it, LICHII_COOP_OWNED_HORSE_DEFAULT
+// of the build (0 when not defined: the emulator and Hookshot builds are
+// unchanged until checked there; the NX2navi build defines 1).
+bool OwnedHorseOn();
 
 // A step one game's quest was moved to by another player's progress.
 struct Raised {

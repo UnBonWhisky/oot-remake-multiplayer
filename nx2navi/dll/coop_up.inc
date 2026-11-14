@@ -217,6 +217,7 @@ private:
         if (session != nullptr) {
             CoopNx2navi::Teleport::Frame(reading, *session, connected, server_now, true);
             SendExtras(*session, connected, reading.has_value());
+            TalkFrame(*session, connected, reading);
         }
         ItemMoment(reading);
         for (const std::string& line : CoopNx2navi::Teleport::TakeLines()) {
@@ -348,6 +349,33 @@ private:
         CoopNx2navi::Overlay::Publish(std::move(s));
     }
 
+    // One talker per NPC (talk_lock.hpp): ours said to the others, theirs refuse ours here.
+    void TalkFrame(coop::host::Session& session, bool connected, const std::optional<coop::host::PlayerReading>& reading) {
+        auto* talk = CoopNx2navi::Up::Talk();
+        if (talk == nullptr) {
+            return;
+        }
+        const std::uint64_t now = SteadyUs();
+        talk->SetScene(scene_ ? *scene_ : std::string());
+        talk->Event(reading && reading->event_running.value_or(false), now);
+        for (const std::string& line : talk->TakeLines()) {
+            g_log.Line("%s", line.c_str());
+        }
+        for (const std::uint8_t player : talk->TakeRefusals()) {
+            CoopNx2navi::Overlay::Banner(CoopNx2navi::TalkLock::Refusal(Name(player), CoopNx2navi::Ui::French()));
+        }
+        const auto notes = talk->TakeSends(now);
+        if (connected && !notes.empty()) {
+            session.with_client([&](coop::net::Client& client) {
+                for (const auto& n : notes) {
+                    client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                            CoopNx2navi::TalkLock::kExtraTalk,
+                                                            CoopNx2navi::TalkLock::Encode(n)});
+                }
+            });
+        }
+    }
+
     // Our own Link's sounds and magic for the other games.
     void SendExtras(coop::host::Session& session, bool connected, bool in_game) {
         namespace Fx = CoopNx2navi::PuppetFx;
@@ -416,6 +444,7 @@ private:
         const std::uint64_t now = SteadyUs();
         const bool event = reading && reading->event_running.value_or(false);
         CoopNx2navi::Up::NoteEvent(event);
+        CoopNx2navi::Up::NoteInGame(reading.has_value());
         const auto lines = CoopNx2navi::Overlay::TakeItemLines();
         if (!item_get_on_) {
             return;
@@ -645,6 +674,16 @@ private:
             break;
         }
         case EventKind::message:
+            // Another player's Ocarina: a notice when their notes make a song (ocarina_song.hpp).
+            if (const auto* note = std::get_if<coop::protocol::OcarinaNote>(&event.message);
+                note != nullptr && note->player_number != 0 && note->player_number < song_ears_.size()) {
+                if (const auto* song = song_ears_[note->player_number].Note(note->note, SteadyUs())) {
+                    const std::string line =
+                        CoopNx2navi::OcarinaSong::Notice(Name(note->player_number), *song, CoopNx2navi::Ui::French());
+                    g_log.Line("ocarina: %s", line.c_str());
+                    CoopNx2navi::Overlay::Notice(line);
+                }
+            }
             if (const auto* extra = std::get_if<coop::protocol::PlayerExtra>(&event.message);
                 extra != nullptr && extra->player_number != 0 && extra->player_number < peer_magic_.size()) {
                 namespace Fx = CoopNx2navi::PuppetFx;
@@ -661,6 +700,15 @@ private:
                     if (const auto n = CoopNx2navi::StepSwitch::Decode(extra->data)) {
                         if (auto* switches = CoopNx2navi::Up::Switches()) {
                             switches->Remote(extra->player_number, *n, SteadyUs());
+                        }
+                    }
+                } else if (extra->kind == CoopNx2navi::TalkLock::kExtraTalk) {
+                    if (const auto n = CoopNx2navi::TalkLock::Decode(extra->data)) {
+                        if (auto* talk = CoopNx2navi::Up::Talk()) {
+                            talk->Remote(extra->player_number, *n, SteadyUs());
+                            g_log.Line("talk: P%u %s NPC %#llx", extra->player_number,
+                                       n->talking ? "talks to" : "stopped talking to",
+                                       static_cast<unsigned long long>(n->hash));
                         }
                     }
                 } else if (extra->kind == Fx::kExtraMagic) {
@@ -689,6 +737,7 @@ private:
         return !settings_.host_save && (server.rfind("127.", 0) == 0 || server == "localhost" || server == "::1");
     }
 
+    std::array<CoopNx2navi::OcarinaSong::Listener, 17> song_ears_{};
     CoopNx2navi::Settings settings_;
     std::string welcome_;
     std::atomic<coop::host::Session*> session_{nullptr};  // the hook's, alive until Up::Stop

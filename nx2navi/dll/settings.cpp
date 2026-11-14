@@ -51,6 +51,7 @@ Settings ParseSettings(std::string_view text, std::vector<std::string>& errors) 
                      : key == "time"         ? &settings.time
                      : key == "drops"        ? &settings.drops
                      : key == "objects_friendly" ? &settings.objects_friendly
+                     : key == "objects_npcs" ? &settings.objects_npcs
                      : key == "host_save"    ? &settings.host_save
                                              : nullptr;
         if (key == "objects_rolls_apart") {

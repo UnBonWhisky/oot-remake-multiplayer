@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstring>
 #include <span>
+#include <utility>
 
 // Offsets: docs/flags.md, read from main of build e0f3ccfaf50065ae.
 namespace coop::host {
@@ -40,6 +41,12 @@ constexpr Table kString64{0x610, 0x618, 0x620, 0x62c, 0x108, 0, 0, 0, 0, 0};
 constexpr std::uint64_t kStringText = 0x68, kStringSize = 0x70;
 // The game's String64 buffers hold 64 bytes; more is not a String64.
 constexpr std::uint32_t kMaxString64Bytes = 64;
+// String64Array (type 17, M + 0x670): entries of 0x90, element count u32 at
+// +0x70, elements of 0x50 at *(+0x78), each a char* at +0 and its buffer
+// size u32 at +8 (0x329ced0 and 0xa7a860 read OwnedHorseList.ActorName so).
+constexpr Table kString64Array{0x670, 0x678, 0x680, 0x68c, 0x90, 0, 0, 0, 0, 0};
+constexpr std::uint64_t kStrArrayCount = 0x70, kStrArrayElems = 0x78, kStrElemSize = 0x50,
+                        kStrElemCap = 0x8;
 // BoolArray: entries of 0x40, element count u32 at +0x20, bits at *(+0x28).
 constexpr Table kBoolArray{0x70, 0x78, 0x80, 0x8c, 0x40, 0, 0, 0, 0, 0};
 constexpr std::uint64_t kArraySize = 0x20, kArrayBits = 0x28;
@@ -305,6 +312,58 @@ bool GameFlags::set_string64_now(WritableGameMemory& m, std::uint32_t hash,
   std::array<std::uint8_t, kMaxString64Bytes> bytes{};
   std::copy(text.begin(), text.end(), bytes.begin());
   return m.write(*buffer, std::span<const std::uint8_t>(bytes.data(), text.size() + 1));
+}
+
+namespace {
+
+// Element `index` of String64Array `hash`: its buffer and buffer size.
+std::optional<std::pair<std::uint64_t, std::uint32_t>> string_array_element(GameMemory& m,
+                                                                            std::uint32_t hash,
+                                                                            std::uint32_t index) {
+  const auto mgr = manager(m);
+  if (!mgr) return std::nullopt;
+  const auto entry_index = find(m, *mgr, kString64Array, hash);
+  if (!entry_index) return std::nullopt;
+  const auto entries = read_ptr(m, *mgr + kString64Array.entries);
+  if (!entries) return std::nullopt;
+  const std::uint64_t entry = *entries + kString64Array.stride * *entry_index;
+  const auto count = read_u32(m, entry + kStrArrayCount);
+  const auto elems = read_ptr(m, entry + kStrArrayElems);
+  if (!count || !elems || index >= *count || *count > 4096) return std::nullopt;
+  const std::uint64_t elem = *elems + kStrElemSize * index;
+  const auto text = read_ptr(m, elem);
+  const auto size = read_u32(m, elem + kStrElemCap);
+  if (!text || !size || *size == 0 || *size > kMaxString64Bytes) return std::nullopt;
+  return std::make_pair(*text, *size);
+}
+
+}  // namespace
+
+std::optional<std::string> GameFlags::get_string64_array(std::uint32_t hash, std::uint32_t index) {
+  const auto at = string_array_element(memory_, hash, index);
+  if (!at) return std::nullopt;
+  std::array<std::uint8_t, kMaxString64Bytes> bytes{};
+  if (!memory_.read(at->first, std::span(bytes.data(), at->second))) return std::nullopt;
+  std::string out;
+  for (std::uint32_t i = 0; i < at->second; ++i) {
+    if (bytes[i] == 0) return out;
+    if (bytes[i] < 0x20 || bytes[i] > 0x7e) return std::nullopt;
+    out.push_back(static_cast<char>(bytes[i]));
+  }
+  return std::nullopt;
+}
+
+bool GameFlags::set_string64_array_now(WritableGameMemory& m, std::uint32_t hash,
+                                       std::uint32_t index, std::string_view text) {
+  if (text.size() + 1 > kMaxString64Bytes) return false;
+  for (const char ch : text) {
+    if (ch < 0x20 || ch > 0x7e) return false;
+  }
+  const auto at = string_array_element(m, hash, index);
+  if (!at || at->second < text.size() + 1) return false;
+  std::array<std::uint8_t, kMaxString64Bytes> bytes{};
+  std::copy(text.begin(), text.end(), bytes.begin());
+  return m.write(at->first, std::span<const std::uint8_t>(bytes.data(), text.size() + 1));
 }
 
 std::optional<GameFlags::QueueSizes> GameFlags::queue_sizes() {

@@ -347,3 +347,28 @@ TEST_CASE("game flags: a String64 written at once into its buffer, and its type 
   CHECK(flags.find_type(0x11) == 0);
   CHECK_FALSE(flags.find_type(0x99));
 }
+
+TEST_CASE("game flags: a String64Array element read and written at once (the owned horse)") {
+  auto w = game();
+  auto& m = w.mem;
+  constexpr std::uint64_t kEntries = 0x8700000000ull, kSlots = 0x8710000000ull,
+                          kElems = 0x8720000000ull, kText = 0x8730000000ull;
+  table(m, 0x670, kEntries, kSlots, 0x90, {0x7bde80e9u});
+  m.put_u32(kEntries + 0x70, 2);         // two elements
+  m.put_u64(kEntries + 0x78, kElems);
+  zero(m, kElems, 0xa0);
+  m.put_u64(kElems, kText);              // element 0
+  m.put_u32(kElems + 8, 64);
+  m.put_u64(kElems + 0x50, kText + 64);  // element 1
+  m.put_u32(kElems + 0x58, 64);
+  zero(m, kText, 128);
+  GameFlags flags(w);
+  CHECK(flags.get_string64_array(0x7bde80e9u, 0) == "");
+  CHECK(GameFlags::set_string64_array_now(w, 0x7bde80e9u, 0, "Animal_Epona_Adult"));
+  CHECK(flags.get_string64_array(0x7bde80e9u, 0) == "Animal_Epona_Adult");
+  CHECK(flags.get_string64_array(0x7bde80e9u, 1) == "");
+  CHECK_FALSE(flags.get_string64_array(0x7bde80e9u, 2));                      // past the count
+  CHECK_FALSE(GameFlags::set_string64_array_now(w, 0x1234, 0, "x"));         // unknown
+  CHECK_FALSE(GameFlags::set_string64_array_now(w, 0x7bde80e9u, 0, std::string(64, 'a')));
+  CHECK(flags.find_type(0x7bde80e9u) == 17);
+}
