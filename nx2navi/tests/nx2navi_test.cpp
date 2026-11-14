@@ -29,6 +29,9 @@
 #include "settings.hpp"
 #include "step_switch.hpp"
 #include "presence.hpp"
+#include "epona.hpp"
+#include "ocarina_play.hpp"
+#include "story_start.hpp"
 #include "talk_lock.hpp"
 #include "ocarina_song.hpp"
 #include "item_get.hpp"
@@ -2380,6 +2383,118 @@ TEST_CASE("presence: a gate whose flag went to 0 leaves, once, and only what the
     CHECK_FALSE(CallDue(0x80));
     CHECK_FALSE(CallDue(0x800000));
     CHECK(CallDue(0x4));  // a bit outside the game's mask
+}
+
+TEST_CASE("presence: every banc entity, both ways: a gate the group opened leaves, one it closed comes back") {
+    using namespace Presence;
+    CHECK(RecordLoaded(0x1));
+    CHECK(RecordLoaded(0x1 | 0x8));
+    CHECK_FALSE(RecordLoaded(0x3));
+    CHECK_FALSE(RecordLoaded(0x0));
+    CHECK(kAbsentPresence == (1u << kPresenceBit));
+    // The Kokiri exit wall (no negation): the gate flag 0 = the way is open, the wall leaves.
+    CHECK(GateAction(0x0, 0x0, false) == Gate::leave);
+    CHECK(GateAction(0x0, kAbsentPresence, false) == Gate::keep);  // already out
+    // The group's flag says closed again (the host's save): the wall comes back.
+    CHECK(GateAction(0x0, kAbsentPresence, true) == Gate::back);
+    CHECK(GateAction(0x0, 0x0, true) == Gate::keep);
+    // Taken out for another reason only: never put back by us.
+    CHECK(GateAction(0x0, 0x80, true) == Gate::keep);
+    // Negated gates.
+    CHECK(GateAction(kBitNegation, 0x0, true) == Gate::leave);
+    CHECK(GateAction(kBitNegation, kAbsentPresence, false) == Gate::back);
+    // Lazy placements are the game's own.
+    CHECK(GateAction(kBitLazy, 0x0, false) == Gate::keep);
+    CHECK(GateAction(kBitLazy, kAbsentPresence, true) == Gate::keep);
+    // The Kokiri who blocks stands 0.6 m from the wall; one 10 m away is not its blocker.
+    const float wall[3] = {-82.0f, 115.1f, -38.0f};
+    const float kokiri[3] = {-81.4f, 115.7f, -37.9f};
+    const float away[3] = {-72.0f, 115.1f, -38.0f};
+    CHECK(IsBlockerNear(wall, kokiri));
+    CHECK_FALSE(IsBlockerNear(wall, away));
+}
+
+// ------------------------------- Epona herself, not only her name (epona.hpp)
+
+TEST_CASE("epona: the owned-horse manager is asked for the horse once the hook wrote her name") {
+    using namespace Epona;
+    Mgr m;
+    m.struct_hash = kOwnedHorseList;
+    m.member_hash = kActorName;
+    m.ready = 1;
+    CHECK(IsManager(m));
+    CHECK(ShouldMake(m, true, true, true));
+    CHECK_FALSE(ShouldMake(m, false, true, true));  // the save owned her already: the area load makes her
+    CHECK_FALSE(ShouldMake(m, true, false, true));  // no name yet
+    CHECK_FALSE(ShouldMake(m, true, true, false));  // a child
+    Mgr linked = m;
+    linked.linked = 0x1234;
+    CHECK_FALSE(ShouldMake(linked, true, true, true));  // a horse is here already
+    Mgr pending = m;
+    pending.flags = kPending;
+    CHECK_FALSE(ShouldMake(pending, true, true, true));
+    Mgr not_ready = m;
+    not_ready.ready = 0;
+    CHECK_FALSE(ShouldMake(not_ready, true, true, true));
+    Mgr asked = m;
+    asked.make_at = 1.0f;
+    CHECK_FALSE(ShouldMake(asked, true, true, true));  // an ask not yet taken
+    Mgr wrong = m;
+    wrong.struct_hash = 0;
+    CHECK_FALSE(ShouldMake(wrong, true, true, true));  // not the manager: never written
+    const float link[3] = {-68.6f, 151.8f, 126.0f};
+    float at[3];
+    PlaceBeside(link, at);
+    CHECK(at[0] == doctest::Approx(-65.6f));
+    CHECK(at[1] == doctest::Approx(151.8f));
+    CHECK(at[2] == doctest::Approx(126.0f));
+}
+
+// ------------------------------- another player's Ocarina notes at their puppet (ocarina_play.hpp)
+
+TEST_CASE("ocarina play: each player's held note is stopped by the next, by a let-go, or after a silence") {
+    using namespace OcarinaPlay;
+    Held h;
+    auto a = h.Note(2, 16, 1000);  // P2: high D
+    CHECK_FALSE(a.stop);
+    CHECK(a.play == 16);
+    CHECK(h.HeldBy(2) == 16);
+    a = h.Note(3, 11, 1100);  // another player's note does not stop P2's
+    CHECK_FALSE(a.stop);
+    CHECK(h.HeldBy(2) == 16);
+    a = h.Note(2, 13, 1500);  // P2's next note stops the first
+    CHECK(a.stop);
+    CHECK(a.play == 13);
+    a = h.Note(2, 0, 1800);  // let go
+    CHECK(a.stop);
+    CHECK(a.play == 0);
+    CHECK(h.HeldBy(2) == 0);
+    a = h.Note(2, 0, 1900);  // a second let-go: nothing
+    CHECK_FALSE(a.stop);
+    CHECK_FALSE(h.Stale(1100 + kHoldMs - 1));
+    CHECK(h.Stale(1100 + kHoldMs + 1) == 3);  // P3 sent nothing more: let go
+    CHECK_FALSE(h.Stale(1100 + kHoldMs + 2));
+    CHECK_FALSE(h.Note(0, 5, 0).play);    // no player 0
+    CHECK_FALSE(h.Note(2, 20, 0).play);   // no note 20
+    CHECK(AssetSlot(1) == kAssets);
+    CHECK(AssetSlot(kNotes) + 8 <= kHandles);
+    CHECK(HandleSlot(kPlayers - 1) + 8 <= kBlock);
+}
+
+// ------------------------------- a story cutscene for every player, wherever (story_start.hpp)
+
+TEST_CASE("story start: the scene and the event flow go to every game and come back whole") {
+    using namespace CoopNx2navi::StoryStart;
+    const Start s{"KokiriForest_Child", "Dm_Kokiri_0030"};
+    const auto back = Decode(Encode(s));
+    REQUIRE(back);
+    CHECK(back->scene == s.scene);
+    CHECK(back->name == s.name);
+    CHECK_FALSE(Decode({}));
+    CHECK_FALSE(Decode({0, 'a', 'b'}));                  // no scene
+    CHECK_FALSE(Decode({'a', 'b', 0}));                  // no name
+    CHECK_FALSE(Decode({'a', '/', 0, 'b'}));             // not a name
+    CHECK(kExtraStory == 6);
 }
 
 // ------------------------------- one talker per NPC (talk_lock.hpp)

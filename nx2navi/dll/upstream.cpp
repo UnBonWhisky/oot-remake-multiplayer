@@ -31,6 +31,11 @@
 #include "coop_story.h"
 #include "coop/host/game_flags.hpp"
 #include "presence.hpp"
+#include "epona.hpp"
+#include "ocarina_play.hpp"
+#include "story_start.hpp"
+#include "teleport.hpp"
+#include "coop_quests.h"
 #include "coop_puppet_config.h"
 #include "coop_puppet_sound.h"
 #include "coop_runtime.h"
@@ -807,6 +812,10 @@ void OnSignGate(Nx2HookCall* call, void*) {
 
 #include "item_get_step.inc"
 #include "presence_step.inc"
+#include "epona_step.inc"
+#include "ocarina_play_step.inc"
+std::mutex g_story_mutex;
+std::vector<StoryStart::Start> g_story_out;  // our own story cutscene starts, for every game (story_start.hpp)
 
 // --- Floor switches pressed by any player are down in every game (step_switch.hpp) ---
 // The step switch's selector `SelectorSwitchStepBootup` (evaluate main+0x11a4920, x0 = the node): [node+0x58]
@@ -1021,6 +1030,14 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
         g_presence_on = false;
     }
     CoopCallers::Add(kPresenceOrder, PresenceStep);
+    if (const char* e = std::getenv("OOT_COOP_EPONA_NOW"); e != nullptr && std::string_view(e) == "0") {
+        g_epona_on = false;
+    }
+    CoopCallers::Add(kEponaOrder, EponaStep);
+    if (const char* e = std::getenv("OOT_COOP_OCARINA_PLAY"); e != nullptr && std::string_view(e) == "0") {
+        g_ocarina_play_on = false;
+    }
+    CoopCallers::Add(kOcarinaPlayOrder, OcarinaPlayStep);
     {
         const char* e = std::getenv("OOT_COOP_DEBUG_OWN_SOUNDS");
         g_own_debug = e != nullptr ? std::atoi(e) : 0;
@@ -1065,8 +1082,27 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
              main_base, g_build.substr(0, 16), g_frame_handle > 0 ? "on" : "REFUSED",
              g_step_handle > 0 ? "on" : "REFUSED", g_counter_handle > 0 ? "on" : "refused",
              g_hold3 ? (brain ? "on (a held copy's AI update main+0xcb9c0 left out)" : "REFUSED") : "off");
+    if (const char* e = std::getenv("OOT_COOP_SCENES_EVERYONE"); e == nullptr || std::string_view(e) != "0") {
+        CoopHook::SetStoryCallbacks(
+            [](const std::string& scene, const std::string& name) {
+                std::lock_guard lock(g_story_mutex);
+                if (g_story_out.size() < 8) {
+                    g_story_out.push_back({scene, name});
+                }
+            },
+            [](std::uint8_t player) { return CoopNx2navi::Teleport::GoTo(player); });
+    }
     CoopHook::Start();
     return true;
+}
+
+void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+    CoopHook::OfferStoryStart(player, scene, name);
+}
+
+std::vector<StoryStart::Start> TakeOwnStoryStarts() {
+    std::lock_guard lock(g_story_mutex);
+    return std::exchange(g_story_out, {});
 }
 
 bool SendChat(const std::string& text) { return g_on && CoopHook::SendChat(text); }
@@ -1084,9 +1120,16 @@ void AskFanfare(int type) {
 int TakeItemDone() { return g_item_done.exchange(0); }
 void NoteEvent(bool event) { g_item_event = event; }
 void NoteInGame(bool in_game) { g_presence_in_game = in_game; }
+void NoteOurPlace(const std::array<float, 3>& at) {
+    std::lock_guard lock(g_epona.mutex);
+    std::memcpy(g_epona.place, at.data(), sizeof g_epona.place);
+    g_epona.place_known = true;
+}
 void NoteOcarina(bool playing) { g_ocarina_playing = playing; }
 std::uint64_t OcarinaNotesHeard() { return g_ocarina_notes_heard.load(); }
 std::uint64_t SwitchCalls() { return g_switch_calls.load(std::memory_order_relaxed); }
+
+void PuppetNote(std::uint8_t player, std::uint8_t note) { QueuePuppetNote(player, note); }
 
 void PuppetSound(std::uint8_t player, const std::string& asset,
                  std::vector<std::pair<std::uint8_t, std::uint32_t>> props) {

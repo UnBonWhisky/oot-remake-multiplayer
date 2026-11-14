@@ -87,6 +87,9 @@ void Joiner::Visit(const std::string& scene) {
     scene_ = scene;
     done_.clear();
     joined_.clear();
+    if (everyone_) {
+        return;  // a start from another scene waits for our trip there
+    }
     std::erase_if(pending_, [&](const Pending& p) { return p.scene != scene; });
 }
 
@@ -111,6 +114,9 @@ bool Joiner::Ours(const std::string& name, const std::string& scene) {
 }
 
 std::string Joiner::Why(const Pending& p, const Here& here, bool played) const {
+    if (everyone_) {
+        return WhyEveryone(p, here, played);
+    }
     if (!here.scene.empty() && p.scene != here.scene) {
         return "we are in another scene";
     }
@@ -151,6 +157,46 @@ std::string Joiner::Why(const Pending& p, const Here& here, bool played) const {
                           static_cast<unsigned long long>(kJoinUs / 1'000'000));
             return text;
         }
+        return "wait";
+    }
+    return "";
+}
+
+std::string Joiner::WhyEveryone(const Pending& p, const Here& here, bool played) const {
+    if (here.now_us >= p.at_us + kEveryoneUs) {
+        return "not reached within " + std::to_string(kEveryoneUs / 1'000'000) + " s";
+    }
+    if (here.scene.empty()) {
+        return "wait";  // a load: its scene decides next frame
+    }
+    if (done_.contains(p.name) && p.scene == here.scene) {
+        return "it played here already this visit";
+    }
+    if (played) {
+        return "this save has it played already";
+    }
+    bool away = p.scene != here.scene || !p.starter || !here.link;
+    float d = 0.0f;
+    if (!away) {
+        const float dx = (*here.link)[0] - (*p.starter)[0];
+        const float dy = (*here.link)[1] - (*p.starter)[1];
+        const float dz = (*here.link)[2] - (*p.starter)[2];
+        d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        away = d > kRoomM || (here.dungeon && p.room && here.room && *p.room != *here.room) ||
+               (here.dungeon && !(p.room && here.room) && d > kNoRoomM);
+    }
+    if (away) {
+        // Our trip took us to the starter, and the starter is no longer where the scene played (the scene
+        // itself moved them to another scene): we stand with them, the scene's result comes by the flags.
+        if (p.bring_asked && here.scene != p.bring_from && p.scene != here.scene) {
+            return "they moved on from where it played; we came to them";
+        }
+        if (!here.can_start && here.link) {
+            return "wait";  // busy: the trip waits too
+        }
+        return here.boss_fight ? "wait" : "bring";
+    }
+    if (!here.can_start || !here.link || here.boss_fight) {
         return "wait";
     }
     return "";

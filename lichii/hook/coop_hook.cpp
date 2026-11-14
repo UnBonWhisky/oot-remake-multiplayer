@@ -73,6 +73,7 @@
 #include "coop_quest.h"
 #include "coop_story.h"
 #include "coop_quests.h"
+#include "coop_talks.h"
 #include "coop_live_events.h"
 #include "coop_shared_scenes.h"
 #include "coop_objects.h"
@@ -92,6 +93,10 @@
 
 namespace CoopHook {
 namespace {
+// Shared story cutscenes for every player, wherever (coop_shared_scenes.h, everyone mode): set by a build.
+void (*g_own_story_start)(const std::string& scene, const std::string& name) = nullptr;
+bool (*g_story_bring)(std::uint8_t player) = nullptr;
+
 
 // The game and build the addresses in coop/host are for.
 constexpr u64 kOcarinaProgramId = 0x0400486024DEC000ULL;
@@ -268,6 +273,7 @@ public:
         if (flag_error.empty()) CoopDungeon::AddShared(session.shared);  // docs/dungeon.md
         if (flag_error.empty()) CoopStory::AddShared(session.shared);  // docs/flags.md, "Story and cutscenes"
         if (flag_error.empty()) CoopQuests::AddShared(session.shared);  // docs/flags.md, "Threads of Time"
+        if (flag_error.empty()) CoopTalks::AddShared(session.shared);  // NPC talk progress (a build's choice)
         if (flag_error.empty()) CoopChests::AddShared(session.shared);  // docs/items.md, "Chests"
         if (!flag_error.empty()) {
             LOG_ERROR(Core, "coop: {}; flags are not shared", flag_error);
@@ -349,6 +355,9 @@ public:
         }
         // Shared story cutscenes: they start by the live-event requester.
         shared_scenes_ = live_events_ && CoopSharedScenes::OnFromEnv(EnvString("LICHII_COOP_SHARED_CUTSCENES"));
+        if (EnvString("LICHII_COOP_SHARED_SCENES_EVERYONE") == "0") {
+            shared_joiner_.SetEveryone(false);
+        }
         LOG_INFO(Core, "coop: cutscene: shared story cutscenes {}",
                  shared_scenes_ ? "on (off with LICHII_COOP_SHARED_CUTSCENES=0)" : "off");
         if (CoopDungeon::On()) {  // room switch flags the game resets itself: one way, no load write-back
@@ -1598,6 +1607,11 @@ private:
     // Shared story cutscenes (coop_shared_scenes.h).
     bool shared_scenes_ = false;  // LICHII_COOP_SHARED_CUTSCENES, needs live events
     CoopSharedScenes::Joiner shared_joiner_;
+    std::uint8_t joined_from_ = 0;       // everyone mode: the starter of the scene we joined
+    bool joined_seen_running_ = false;
+    std::uint8_t regroup_to_ = 0;        // everyone mode: after a scene, go to this starter until near
+    std::uint64_t regroup_until_us_ = 0;
+    std::uint64_t regroup_next_us_ = 0;
     bool test_event_done_ = false;  // LICHII_COOP_TEST_EVENT
 #if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
     CoopEvery::Every played_watch_{CoopEvery::kSecondUs};
@@ -1625,6 +1639,21 @@ private:
         return rooms;
     }
 
+public:
+    // Another player's story cutscene start told to every scene by a build (everyone mode). Any thread.
+    void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+        if (!shared_scenes_ || !CoopSharedScenes::IsShared(name)) {
+            return;
+        }
+        coop::protocol::DungeonEvent e;
+        e.player_number = player;
+        e.scene = scene;
+        e.name = name;
+        std::lock_guard lock(dungeon_events_mutex_);
+        story_events_in_.push_back(std::move(e));
+    }
+
+private:
     // Shared story cutscenes (coop_shared_scenes.h): a story cutscene
     // our game starts goes to the others in our scene (DUNGEON_EVENT, as a
     // gimmick event's start); one another player started near us plays here
@@ -1670,6 +1699,20 @@ private:
         here.can_start = reading && !running &&
                          (status & (proto::status::paused | proto::status::in_menu | proto::status::loading)) == 0;
         here.now_us = now_us;
+        here.boss_fight = CoopBoss::Fighting();
+        // Everyone mode (coop_shared_scenes.h): a start that waits for our trip is joined once we stand near
+        // its starter, so where the starters are now is told each frame while one waits.
+        if (shared_joiner_.Everyone() && shared_joiner_.Waiting() != 0 && !here.scene.empty()) {
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.scene == here.scene) {
+                    std::optional<int> room;
+                    if (const auto guess = DungeonRooms().Nearest(here.scene, r.position)) {
+                        room = guess->room;
+                    }
+                    shared_joiner_.UpdateStarter(r.number, here.scene, r.position, room);
+                }
+            }
+        }
         // In a dungeon only a starter in our own room is joined (the other
         // rooms are not loaded here: a black picture until the cutscene ends).
         if (shared_joiner_.Waiting() != 0 && here.link && CoopDungeon::IsDungeonScene(here.scene)) {
@@ -1696,6 +1739,9 @@ private:
                 LOG_INFO(Core, "coop: cutscene: {} started while our Link is dead: not shared", *found);
             }
             if (found && !dead_here && shared_joiner_.Ours(*found, here.scene)) {
+                if (g_own_story_start != nullptr) {
+                    g_own_story_start(here.scene, *found);  // a build that tells every scene, not only ours
+                }
                 proto::DungeonEvent e;
                 e.scene = here.scene;
                 e.name = *found;
@@ -1766,12 +1812,58 @@ private:
                 live_requester_.Want(want.second, here.scene);
             }
         }
+        if (const auto to = shared_joiner_.TakeBring()) {
+            if (g_story_bring != nullptr && g_story_bring(*to)) {
+                LOG_INFO(Core, "coop: cutscene: going to player {} for their story cutscene", *to);
+            } else {
+                LOG_INFO(Core, "coop: cutscene: cannot go to player {} for their story cutscene (no trip here)", *to);
+            }
+        }
         for (const auto& line : shared_joiner_.TakeNotes()) {
             LOG_INFO(Core, "coop: cutscene: {}", line);
         }
         if (name) {
             std::lock_guard lock(live_mutex_);
             live_requester_.Want(*name, here.scene, now_us, CoopSharedScenes::kJoinUs);
+            joined_from_ = 0;
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.scene == here.scene) {
+                    joined_from_ = joined_from_ == 0 ? r.number : joined_from_;
+                }
+            }
+            joined_seen_running_ = false;
+        }
+        // Everyone mode: after a joined scene, everybody stands together where the starter is (the scene may
+        // have put our Link elsewhere than theirs).
+        if (shared_joiner_.Everyone() && joined_from_ != 0) {
+            if (running) {
+                joined_seen_running_ = true;
+            } else if (joined_seen_running_ && here.can_start) {
+                regroup_to_ = joined_from_;
+                regroup_until_us_ = now_us + 60'000'000;
+                regroup_next_us_ = now_us;
+                joined_from_ = 0;
+                LOG_INFO(Core, "coop: cutscene: the scene is over here: standing with player {} where it left them",
+                         regroup_to_);
+            }
+        }
+        // Until we stand within 10 m of the starter (asked again every 5 s: the starter's game refuses a trip
+        // while its own scene still plays), for up to 60 s.
+        if (regroup_to_ != 0 && now_us >= regroup_next_us_) {
+            regroup_next_us_ = now_us + 5'000'000;
+            bool near = false;
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.number == regroup_to_ && r.scene == here.scene && here.link) {
+                    const float dx = r.position[0] - (*here.link)[0], dy = r.position[1] - (*here.link)[1],
+                                dz = r.position[2] - (*here.link)[2];
+                    near = dx * dx + dy * dy + dz * dz < 10.0f * 10.0f;
+                }
+            }
+            if (near || now_us >= regroup_until_us_) {
+                regroup_to_ = 0;
+            } else if (here.can_start && g_story_bring != nullptr && g_story_bring(regroup_to_)) {
+                LOG_INFO(Core, "coop: cutscene: going to player {} where their scene left them", regroup_to_);
+            }
         }
     }
 
@@ -2104,6 +2196,21 @@ std::vector<PlayerRow> PlayerList() {
         return coop->PlayerList();
     }
     return {};
+}
+
+void SetStoryCallbacks(void (*own_start)(const std::string& scene, const std::string& name),
+                       bool (*bring)(std::uint8_t player)) {
+    g_own_story_start = own_start;
+    g_story_bring = bring;
+}
+
+void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+    if (g_mod_refused) {
+        return;
+    }
+    if (auto* coop = Get()) {
+        coop->OfferStoryStart(player, scene, name);
+    }
 }
 
 } // namespace CoopHook

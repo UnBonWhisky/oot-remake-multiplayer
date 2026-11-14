@@ -148,7 +148,7 @@ bool IsOwnNpc(std::string_view name) {
     constexpr std::string_view kOwn[] = {
         "Npc_Kaepora", "Npc_Hylia_Sheik", "Npc_Hylia_Zelda", "Npc_Hylia_Impa", "Npc_Zora_Ruto",
         "Npc_Gerudo_Nabooru", "Npc_Goron_Darunia", "Npc_GreatFairy", "Npc_JabuJabu", "Npc_DekuTreeChild",
-        "Npc_SkullKid", "Npc_Kokiri_Saria", "Npc_Kokiri_Mido", "Npc_Kokiri_007", "Npc_Pierre", "Npc_Bonooru",
+        "Npc_SkullKid", "Npc_Kokiri_Saria", "Npc_Kokiri_Mido", "Npc_Pierre", "Npc_Bonooru",
         "Npc_Hylia_RunningMan", "Npc_Hylia_Dampe", "Npc_KotakeKoume", "Npc_DungeonBoss", "Npc_Narrator",
         "Npc_EventStarter", "Npc_Dream", "Npc_GuidePoe", "Npc_Kakashi", "Npc_Fairy", "Npc_Animal"};
     for (const std::string_view own : kOwn) {

@@ -48,8 +48,33 @@ namespace {
 // raises DoorOfTime from our Goto_HyruleCastle; both only raise.
 const std::vector<Quest>& Table() {
     static const std::vector<Quest> kQuests = {
+#if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
+        // Shared by their end only (complete_only, as Get_Epona), in a build that defines
+        // LICHII_COOP_QUEST_ENDS: their steps look branched, so each player keeps their own, but a
+        // quest Complete in any game is Complete in all (the world opened for everyone). The names of
+        // the two Sage quests without a Sheik step name are read from their steps (Water: the Zora
+        // steps Step05_01 to _03; Spirit: the child and adult halves Step07_1 / Step07_2).
+        {0x1002b466u, "Get_StoneOfFire",
+         {"NotReady", "Ready", "KakarikoVillageNpc", "KakarikoVillageLetter", "DeathMtTrailIn",
+          "DeathMtTrailNpc", "GoronCityIn", "GoronCityDarniaroomNpcTalk01", "GoronCityDarniaroomOpen",
+          "GoronCityDarniaTalk", "DarniaRoomKokiriTalk", "KokiriForestNPCTalk", "KokiriForestFire",
+          "KokiriForestIn", "SariaMelodyGet", "SariaMelodyPlay", "DodongoCavernOpne", "DungeonStart",
+          "BossBattle", "EscapeDungeon", "Complete"},
+         0, true},
+        {0x19189e9du, "SageOfWater",
+         {"NotReady", "Ready", "Step01", "Step02", "Step03", "Step04", "Step05", "Step05_01", "Step05_02",
+          "Step05_03", "Step06", "Step07", "Step07_pre00", "Step07_00", "Step08", "Step08_01", "Step09",
+          "Step09_01", "Step10", "Complete"},
+         0, true},
+#endif
         {0x3372689bu, "Meet_DekuTree", {"NotReady", "Ready", "Step01", "Step02", "Step03", "Complete"}},
         {0x44063c4eu, "SubEvent_GetMelodySun", {"NotReady", "Ready", "GetMelodySun", "Complete"}},
+#if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
+        {0x560a64afu, "SageOfSpirit",
+         {"NotReady", "Ready", "Step00", "Step01", "Step03", "Step04", "Step05", "Step06", "Step07",
+          "Step07_00", "Step07_1", "Step07_1_Safety", "Step07_2", "Step08", "Complete"},
+         0, true},
+#endif
         {0x5bca02a6u, "Get_StoneOfWater",
          {"NotReady", "Ready", "Step01", "Step02", "Step03", "Step03_Impa", "Step04", "Step05",
           "Step05_01", "Step06", "Step07", "Step08", "Step09", "Step10", "Step11", "Step12", "Step13",
@@ -61,6 +86,12 @@ const std::vector<Quest>& Table() {
         {0x7a5b9537u, "SubEvent_GetStormSong",
          {"NotReady", "Ready", "ReadyForGetStormSong", "step02", "step03", "BeforeBossRoom", "step04",
           "step05", "Complete"}},
+#if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
+        {0x7a91dbd5u, "SageOfShadow",
+         {"NotReady", "Ready", "GoToDungeon", "GotGlassTruth", "GetGlassTruth", "MeetBoss", "BattleOnShip",
+          "BeforeBossRoom", "DefeatBoss", "GoToWarpPoint", "Complete"},
+         0, true},
+#endif
         {0x7d776b61u, "Get_StoneOfForest",
          {"NotReady", "Ready", "GoInside", "MeetBoss", "GoToBossRoom", "DefeatBoss", "GoToWarpPoint",
           "Complete"}},

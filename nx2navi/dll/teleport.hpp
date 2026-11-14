@@ -65,6 +65,10 @@ void SetArriveEvent(bool on);
 // Frame thread: true when `text` is a command (done here, not sent as chat).
 bool OnChat(std::string_view text, coop::host::Session& session);
 
+// Any thread: go to that player, as "/teleport" does (a story cutscene of theirs, story_start.hpp). False when
+// no trip can be made here.
+bool GoTo(std::uint8_t player);
+
 // Network thread, from the session's on_event (the network lock is held).
 void OnEvent(const coop::net::Event& event, coop::net::Client& client);
 

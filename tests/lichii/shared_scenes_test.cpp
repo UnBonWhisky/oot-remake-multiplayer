@@ -168,3 +168,69 @@ TEST_CASE("outside a dungeon rooms do not count: the 30 m rule alone") {
     j.Started(1, "Dm_Kokiri_0030", "KokiriForest", kBridge, 100, 2);
     CHECK(j.Next(h, kNotPlayed) == std::optional<std::string>("Dm_Kokiri_0030"));
 }
+
+TEST_CASE("everyone mode: a start from another scene brings us to the starter, then plays there") {
+    Joiner j;
+    j.SetEveryone(true);
+    // P2 starts Dm_Kokiri_0030 in Kokiri Forest while we are in Hyrule Field.
+    j.Started(2, "Dm_Kokiri_0030", "KokiriForest", std::nullopt, 1'000'000);
+    Here field = Free(1'100'000, {0.0f, 0.0f, 0.0f}, "HyruleField");
+    CHECK_FALSE(j.Next(field, kNotPlayed));
+    CHECK(j.TakeBring() == std::uint8_t{2});
+    CHECK_FALSE(j.TakeBring());                                // asked once
+    field.now_us = 5'000'000;
+    CHECK_FALSE(j.Next(field, kNotPlayed));
+    CHECK_FALSE(j.TakeBring());                                // not again before kBringAgainUs
+    field.now_us = 1'100'000 + CoopSharedScenes::kBringAgainUs + 1;
+    CHECK_FALSE(j.Next(field, kNotPlayed));
+    CHECK(j.TakeBring() == std::uint8_t{2});                   // the starter refused while in its scene: again
+    // The trip: a load (no scene), then Kokiri Forest beside P2. The start is kept across the scene change.
+    Here load;
+    load.now_us = 20'000'000;
+    CHECK_FALSE(j.Next(load, kNotPlayed));
+    j.UpdateStarter(2, "KokiriForest", kBridge, std::nullopt);
+    const auto name = j.Next(Free(25'000'000), kNotPlayed);
+    REQUIRE(name);
+    CHECK(*name == "Dm_Kokiri_0030");
+}
+
+TEST_CASE("everyone mode: a boss fight or a busy game waits; a starter who moved on is joined where they are") {
+    Joiner j;
+    j.SetEveryone(true);
+    j.Started(3, "Dm_Kokiri_0030", "KokiriForest", kBridge, 1'000'000);
+    Here fight = Free(2'000'000);
+    fight.boss_fight = true;
+    CHECK_FALSE(j.Next(fight, kNotPlayed));
+    CHECK(j.Waiting() == 1);
+    Here busy = Free(30'000'000);
+    busy.can_start = false;
+    CHECK_FALSE(j.Next(busy, kNotPlayed));
+    CHECK(j.Waiting() == 1);                                   // longer than the 3 s / 20 s rule: still waits
+    CHECK(j.Next(Free(31'000'000), kNotPlayed));
+    // Another start: we go to them, and arrive in another scene than the scene's (it moved them on).
+    Joiner k;
+    k.SetEveryone(true);
+    k.Started(3, "Dm_Kokiri_0030", "KokiriForest", std::nullopt, 1'000'000);
+    CHECK_FALSE(k.Next(Free(1'500'000, {0, 0, 0}, "HyruleField"), kNotPlayed));
+    CHECK(k.TakeBring() == std::uint8_t{3});
+    CHECK_FALSE(k.Next(Free(20'000'000, {0, 0, 0}, "LostWoods"), kNotPlayed));
+    CHECK(k.Waiting() == 0);                                   // "they moved on": we stand with them
+    // Too late: not after kEveryoneUs.
+    Joiner l;
+    l.SetEveryone(true);
+    l.Started(3, "Dm_Kokiri_0030", "KokiriForest", kBridge, 1'000'000);
+    Here stuck = Free(1'000'000 + CoopSharedScenes::kEveryoneUs);
+    stuck.can_start = false;
+    CHECK_FALSE(l.Next(stuck, kNotPlayed));
+    CHECK(l.Waiting() == 0);
+}
+
+TEST_CASE("everyone mode is off unless the build or the switch says so") {
+    Joiner j;
+    CHECK(j.Everyone() == CoopSharedScenes::kEveryoneDefault);
+    j.SetEveryone(false);
+    j.Started(2, "Dm_Kokiri_0030", "KokiriForest", std::nullopt, 1'000'000);
+    CHECK_FALSE(j.Next(Free(1'100'000, {0, 0, 0}, "HyruleField"), kNotPlayed));
+    CHECK_FALSE(j.TakeBring());
+    CHECK(j.Waiting() == 0);                                   // skipped as before
+}

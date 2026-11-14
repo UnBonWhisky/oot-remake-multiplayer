@@ -351,6 +351,17 @@ private:
 
     // One talker per NPC (talk_lock.hpp): ours said to the others, theirs refuse ours here.
     void TalkFrame(coop::host::Session& session, bool connected, const std::optional<coop::host::PlayerReading>& reading) {
+        if (const auto starts = CoopNx2navi::Up::TakeOwnStoryStarts(); connected && !starts.empty()) {
+            session.with_client([&](coop::net::Client& client) {
+                for (const auto& st : starts) {
+                    client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                            CoopNx2navi::StoryStart::kExtraStory,
+                                                            CoopNx2navi::StoryStart::Encode(st)});
+                    g_log.Line("cutscene: our story cutscene %s in %s told to every game", st.name.c_str(),
+                               st.scene.c_str());
+                }
+            });
+        }
         auto* talk = CoopNx2navi::Up::Talk();
         if (talk == nullptr) {
             return;
@@ -445,6 +456,9 @@ private:
         const bool event = reading && reading->event_running.value_or(false);
         CoopNx2navi::Up::NoteEvent(event);
         CoopNx2navi::Up::NoteInGame(reading.has_value());
+        if (reading) {
+            CoopNx2navi::Up::NoteOurPlace({reading->position[0], reading->position[1], reading->position[2]});
+        }
         CoopNx2navi::Up::NoteOcarina(reading && reading->animation &&
                                      CoopOcarinaSound::Playing(reading->animation->name));
         const auto lines = CoopNx2navi::Overlay::TakeItemLines();
@@ -681,6 +695,7 @@ private:
                 note != nullptr && note->player_number != 0 && note->player_number < song_ears_.size()) {
                 g_log.Line("ocarina: P%u's note %u (%s)", note->player_number, note->note,
                            note->note != 0 ? CoopOcarinaSound::AssetName(note->note).c_str() : "let go");
+                CoopNx2navi::Up::PuppetNote(note->player_number, note->note);
                 if (const auto* song = song_ears_[note->player_number].Note(note->note, SteadyUs())) {
                     const std::string line =
                         CoopNx2navi::OcarinaSong::Notice(Name(note->player_number), *song, CoopNx2navi::Ui::French());
@@ -705,6 +720,12 @@ private:
                         if (auto* switches = CoopNx2navi::Up::Switches()) {
                             switches->Remote(extra->player_number, *n, SteadyUs());
                         }
+                    }
+                } else if (extra->kind == CoopNx2navi::StoryStart::kExtraStory) {
+                    if (const auto st = CoopNx2navi::StoryStart::Decode(extra->data)) {
+                        g_log.Line("cutscene: P%u started the story cutscene %s in %s", extra->player_number,
+                                   st->name.c_str(), st->scene.c_str());
+                        CoopNx2navi::Up::OfferStoryStart(extra->player_number, st->scene, st->name);
                     }
                 } else if (extra->kind == CoopNx2navi::TalkLock::kExtraTalk) {
                     if (const auto n = CoopNx2navi::TalkLock::Decode(extra->data)) {

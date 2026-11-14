@@ -165,12 +165,14 @@ Runs on copies of the save, two games on one PC, pictures of both games at the s
   | Time of day | the host's clock | seen (`td2`) |
   | Timed switches, torches that burn out, the Forest Temple lift and room spins, the Song of Time blocks | each game's own | not done |
   | Weather | each game's own | not done |
-  | Story gates that open (a blocker steps aside, a wall goes): the area already loaded | the game where it happened; the others take the placement out at once (since 2026-11-14) | built, see below |
+  | Story gates (a blocker steps aside, a wall goes, also actor-less walls), both ways | the group's flag (opened by anyone, closed by the host's save); every game switches the placement at once and makes the blocker NPC beside it again | done for the Kokiri Forest exit, seen both ways (`bl4`); the other walls take the same path, not seen |
   | Townspeople's places and walks | one owner game per NPC (the server's nearest-player rule), the others show a copy (since 2026-11-14) | built, see below |
   | Who talks to an NPC | the first player who asks; the others are refused while that talk lasts (since 2026-11-14) | built, see below |
-  | Another player's story cutscene | the starter's game; the others join within 20 s when in the same area (since 2026-11-14 a busy game waits) | built, see below |
-  | Epona's ownership | the quest's end, from whichever game won the race; each adult then owns their own Epona (since 2026-11-14) | built, see below |
-  | NPC talk progress (`HaveTalked_Special.*`), minigames' state, the Song of Time blocks, timed doors | each game's own | not done |
+  | Another player's story cutscene | the starter's game; every other game plays it too: brought to the starter first when elsewhere, a busy game or a boss fight waits (up to 180 s), and everybody then stands where the starter's scene left them | built; see the night of 2026-11-14 |
+  | Epona's ownership | the quest's end, from whichever game won the race; each adult then owns and calls their own Epona, made at once | done, seen (`ep19`, `ep20`: the second player calls and rides her) |
+  | NPC talk progress (`HaveTalked_Special.*`, 402 saved Bools) | any game that had the talk (kept, as the story flags) | built (this build only); see the night of 2026-11-14 |
+| Minigames' state, the Song of Time blocks, timed doors | each game's own | not done |
+| Another player's Ocarina notes | the player's game sends each note; each game plays it at that player's puppet | built; the notes are emitted (`ep20`), not listened to |
 - **A floor switch pressed in one game is down in every game** (`dll/step_switch.{hpp,cpp}`, `dll/upstream.cpp` `OnStepSelector`). A research sub-agent read this from the switch's AI file and the lifted code (not from a run):
   - The step switch decides with its selector `SelectorSwitchStepBootup` (evaluate main+0x11a4920, x0 = the node, actor `[[[node+8]+8]+0x1f0]`). It goes to its On child (`Button_Pushed`, logic output `OnState`, which the room uses) when the button's slider is at its bottom, or when its ForceOn input is set (a bool byte at `[node+0x58]`). Its current child is the byte at +0x1e and the On child's index the byte at +0x68.
   - A hook on that call reads whether our switch is On and sends it as `PLAYER_EXTRA` kind 3 (u8 pressed, u64 placement hash, scene). It is sent on each change and again every 2 s while pressed.
@@ -222,6 +224,59 @@ The user's report, playing by hand: Epona was not unlocked for the second player
   - The presence step finds placed actors with a shared story gate (`csbl2`: `6 loaded actors have a presence flag, 3 of them a shared story gate: EventProxyRequestActor(KakarikoVillage_LeaveKakariko_Npc_Hylia_Talon_Adult=0) Obj_SignBoard_A_01(...)`), **but the Kokiri Forest exit wall is not among the loaded actors** (`7 loaded actors have a presence flag, 0 of them a shared story gate` in Kokiri Forest): that wall is a banc entity without an actor, so this step cannot take it out; it still goes only with the next area load. Not done: walls and other actor-less placements (they need the banc entity list, not the actor list).
   - One talker per NPC: **not seen in a game.** The runs that were to show it (`cstk1` to `cstk3`) did not put the two Links beside Malon (her daytime place was not where her placement is, and the run's actor log that was to find her stayed empty), so no talk was asked in either game. The refusal itself is unit-tested only.
 
+
+### Since the night of 2026-11-14: Epona ridden, gates of the group, Ocarina at the puppet, cutscenes for everyone, talk progress (branch `sync-quests-npcs`)
+
+What the user asked after the afternoon's runs, and what is done now. Every run was on save copies, with two games on this PC and paired pictures (`launcher-test\pair_sheet.py`). Both windows had `NX2NAVI_BACKGROUND_WINDOW=1`, and the profile's save hashes were unchanged after each run.
+
+- **Epona for everyone: done** (`dll/epona.hpp`, `dll/epona_step.inc`; [docs/flags.md](../docs/flags.md), "Epona: the owned horse").
+  - Why the name alone did nothing (read from the lifted code by a research sub-agent): Epona's Song calls only a horse actor that the OwnedHorseMgr has linked, and the game makes that actor only when an area loads. So the name alone brings her after the next area load.
+  - The port also asks the manager to make her at once. It writes three floats at mgr+0x50c (our Link's place plus 3 m), and the manager's own update makes `Animal_Epona_Adult_Owned` there and registers her.
+  - This happens once per session, when all of these hold: the owned horse's name was empty when the session started and is set now, we are adult, and no horse is linked.
+  - `OOT_COOP_EPONA_NOW=0` leaves it to the next area load.
+  - Run `ep19`: the second game links the horse 1 s after the quest's end arrives there. The second player plays Epona's Song and she trots up, with the game's "A Monter" (`launcher-test\ep19-b-after.png`).
+  - Run `ep20`: the second player mounts her and gallops 100 m to the edge of the field (`ep20-b-ride.png`). The first player's own Epona stays beside them (`ep20-sheet.png`).
+- **A story gate is the group's, at once, both ways** (`dll/presence.hpp`, `dll/presence_step.inc`).
+  - The Kokiri Forest exit wall has no actor: its collision is a body of the area's static compound. So the step now walks every banc entity of the loaded areas (A = [main+0x4e91940], records of 0x58 bytes, entities of 0x100 bytes; layout read by a research sub-agent).
+  - An entity whose `Presence` names a shared story gate is switched by the game's own absent-reason toggle main+0x2c2f880 (bit 1). It leaves when the group's flag opens the gate. It comes back when the group's flag (the host's save) closes it.
+  - A blocker NPC standing within 6 m of that wall, such as the Kokiri at the exit, is made again: its absent reason is set, then cleared a second later, so its schedule reads the flag anew.
+  - Lazy placements are left to the game.
+  - The Kokiri who blocks the exit (`Npc_Kokiri_007_Child`) is now shared like the townspeople: one owner game decides his place and pose, and the others show a copy. He used to be each game's own, and in runs `tk3` and `tk4` he stood at different places in the two games. Mido stays each game's own (his talks start story scenes).
+  - Run `bl4` (`launcher-test\bl4-joiner-walks.png`, `bl4-b-open.png`), in three steps:
+    - Closed for both: the joiner pushes towards the exit and does not get past.
+    - The host's game opens the gate (the flag goes to 0). The wall leaves in both games, 0.1 s and 0.5 s later (`placement without actor (0x3612b617269aa6fb at -82.0 115.1 -38.0) leaves at once`), and the Kokiri is made again. The joiner walks past him, now standing aside, into the exit tunnel (52.5 m to 63.4 m from the host).
+    - The host's game closes the gate again. The wall comes back in both games within 0.7 s, the Kokiri stands in the way again, and the joiner does not get past.
+  - The case of a guest whose own save is past the gate while the host's is not uses the same mechanism (the group's flag closes it; the host's save decides at the join). It was not run on its own.
+  - Not done: the Death Mountain gate guard and the other gates that are only an NPC's schedule, with no `Presence` placement. Their NPC follows the shared flag at the next area load.
+  - The other walls the research listed take the same path, but only the Kokiri exit was seen: Mido's, the adult Lost Woods wall, Jabu-Jabu's mouth wall, Zora's Domain, and the Lon Lon walls of Hyrule Field.
+- **Another player's Ocarina, played at their puppet** (`dll/ocarina_play.hpp`, `dll/ocarina_play_step.inc`).
+  - Each note arrives as `OCARINA_NOTE` (note 1 to 19, 0 = let go).
+  - The receiving game finds the game's own global `Ocarina` sound user, through the Ocarina sound module's wrapper (U = [[R]+0x20](R)). It is the only user that holds the 19 `Ocarina_*` notes. `Player_Adult` has none, which is why nothing played before.
+  - The note's asset is searched there once and emitted on the friend's puppet's sound user. The game's 3D sound system then places the note at the puppet, with that user's distance attenuation.
+  - The notes loop, so each one is stopped (main+0x7cc120): by the next note, by the let-go, or after 4 s with no word.
+  - `OOT_COOP_OCARINA_PLAY=0` turns it off.
+  - Run `ep20`, the host's log: `the game's Ocarina sound user is ...`, then ten notes of the form `P2's puppet plays 'Ocarina_HighD'`, each emit returning an event. **Nobody listened**, and the loudness by distance was not measured.
+  - For the pull request: upstream's pad-to-note table is wrong for this game. Here A plays the A note, Y the B and X the high D.
+- **A story cutscene for every player, wherever they are** (`lichii/hook/coop_shared_scenes` "everyone mode", `LICHII_COOP_SHARED_SCENES_EVERYONE=1` in this build only; `dll/story_start.hpp`).
+  - The server relays DUNGEON_EVENT to the starter's scene only, so our own start also goes to every game as `PLAYER_EXTRA` kind 6 (the scene and the event flow).
+  - A game that is in another scene, too far away, or in another dungeon room is brought to the starter by the port's trip to another player (`Teleport::GoTo`), and then plays the scene there. The trip is asked again every 15 s while the starter's game refuses it.
+  - A busy game (a talk, a menu, a load) waits, for up to 180 s. So does a game in a boss fight: the scene waits until the fight ends.
+  - After a joined scene, a player more than 10 m from the starter goes to them. This is asked every 5 s, for up to 60 s.
+  - A scene started while our Link is dead is still not shared.
+  - `LICHII_COOP_SHARED_SCENES_EVERYONE=0` gives back the same-area rule.
+- **NPC talk progress shared** (`lichii/hook/coop_talks.{h,cpp}`, `LICHII_COOP_SHARE_TALKS=1` in this build only; `LICHII_COOP_TALKS=0` turns it off).
+  - The 402 `HaveTalked_Special.*` names of the event flows are members of the GameData Struct `HaveTalked_Special`.
+  - Each one is also a saved Bool keyed by the hash of its full dotted name (checked against GameDataList), so they join the shared flags as Bools, with no struct access.
+- **Four more quests shared by their end** (`LICHII_COOP_QUEST_ENDS=1` in this build only): Get_StoneOfFire, SageOfShadow, SageOfSpirit and SageOfWater, `complete_only` as Get_Epona.
+  - Their steps branch, so they stay each player's own on purpose.
+  - A Complete in any game is Complete in all, so the world is open for everyone.
+- New test switches: `OOT_COOP_EPONA_NOW=0`, `OOT_COOP_OCARINA_PLAY=0`, `OOT_COOP_SCENES_EVERYONE=0` (the port no longer tells every game or makes the trip), `LICHII_COOP_SHARED_SCENES_EVERYONE=0`, `LICHII_COOP_TALKS=0`.
+- New scripts in `launcher-test`:
+  - `ep2_run.sh`, `ep3_run.sh`: Epona ridden.
+  - `bl2_run.sh`: the gate both ways. To walk forward, push the stick up (+32767).
+  - `tk2_run.sh`: one talker per NPC.
+  - `ct2_run.sh`: a player far away when the scene starts. `ct3_run.sh`: a busy player.
+  - `cs_chain2.sh` to `cs_chain4.sh`.
 
 ## Build
 

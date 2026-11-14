@@ -598,6 +598,16 @@ bool OnChat(std::string_view text, coop::host::Session& session) {
     return true;
 }
 
+bool GoTo(std::uint8_t player) {
+    Glue& g = TheGlue();
+    std::lock_guard lock(g.mutex);
+    if (!g.configured || !g.game_thread || player == 0) {
+        return false;
+    }
+    g.want = std::make_pair(player, "P" + std::to_string(player));
+    return true;
+}
+
 void OnEvent(const coop::net::Event& event, coop::net::Client& client) {
     using coop::net::EventKind;
     Glue& g = TheGlue();

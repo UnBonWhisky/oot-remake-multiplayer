@@ -219,12 +219,13 @@ Merged into `integrate-p11`, with unit tests and review. None of it is proven in
 | Navi in the right room | #145 | navi-room-2 |
 | A guest's save load no longer resets the host's world | #159 | world-reset |
 | PvP, off by default ([play-online.md](play-online.md#pvp-players-hurting-each-other)) | | pvp |
-| Epona owned by every adult once one player won her (the owned-horse list, not only the quest) | | sync-quests-npcs (NX2navi build) |
-| A story gate (blocker, wall) opened by one player leaves the others' loaded area at once | | sync-quests-npcs (NX2navi port) |
+| Epona owned by every adult once one player won her (the owned-horse list, and the horse itself made at once in the NX2navi port: the second player calls and rides her, run ep20) | | sync-quests-npcs (NX2navi build) |
+| A story gate is the group's: a wall or placement opened by one player leaves every game at once, and comes back at once when the group's flag closes it again (the banc entity list, also actor-less walls; the blocker NPC beside it is made again); the Kokiri Forest exit seen both ways (run bl4) | | sync-quests-npcs (NX2navi port) |
 | Townspeople shared in the NX2navi port (not animals, not one player's story NPCs) | #200 | sync-quests-npcs |
 | One talker per NPC: a second player's talk is refused with a line on the screen | | sync-quests-npcs (NX2navi port) |
-| Another player's story cutscene waits up to 20 s for a busy game; its own shared played flag no longer skips it | | sync-quests-npcs (NX2navi build) |
-| Own Ocarina notes in the NX2navi port (from the game's note sounds) and a notice for a song another player played | #152 | sync-quests-npcs |
+| Another player's story cutscene waits up to 20 s for a busy game; its own shared played flag no longer skips it; in the NX2navi build every player plays it wherever they are (brought to the starter first, `LICHII_COOP_SHARED_SCENES_EVERYONE`) | | sync-quests-npcs (NX2navi build) |
+| Own Ocarina notes in the NX2navi port (from the game's note sounds), played at the friend's puppet with the game's `Ocarina` sound assets, and a notice for a song another player played | #152 | sync-quests-npcs |
+| NPC talk progress (the 402 `HaveTalked_Special.*` Bools) and the end of four branched quests (Stone of Fire, Sages of Shadow, Spirit, Water) | | sync-quests-npcs (NX2navi build: `LICHII_COOP_SHARE_TALKS`, `LICHII_COOP_QUEST_ENDS`) |
 
 ## How to keep this page
 
