@@ -74,6 +74,7 @@
 #include "guest_memory.hpp"
 #include "item_get.hpp"
 #include "ocarina_song.hpp"
+#include "coop_ocarina_sound.h"
 #include "coop_boss.h"
 #include "objects/objects.hpp"
 #include "objects/brain.hpp"

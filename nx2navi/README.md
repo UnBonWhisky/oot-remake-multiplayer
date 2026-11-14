@@ -165,6 +165,12 @@ Runs on copies of the save, two games on one PC, pictures of both games at the s
   | Time of day | the host's clock | seen (`td2`) |
   | Timed switches, torches that burn out, the Forest Temple lift and room spins, the Song of Time blocks | each game's own | not done |
   | Weather | each game's own | not done |
+  | Story gates that open (a blocker steps aside, a wall goes): the area already loaded | the game where it happened; the others take the placement out at once (since 2026-11-14) | built, see below |
+  | Townspeople's places and walks | one owner game per NPC (the server's nearest-player rule), the others show a copy (since 2026-11-14) | built, see below |
+  | Who talks to an NPC | the first player who asks; the others are refused while that talk lasts (since 2026-11-14) | built, see below |
+  | Another player's story cutscene | the starter's game; the others join within 20 s when in the same area (since 2026-11-14 a busy game waits) | built, see below |
+  | Epona's ownership | the quest's end, from whichever game won the race; each adult then owns their own Epona (since 2026-11-14) | built, see below |
+  | NPC talk progress (`HaveTalked_Special.*`), minigames' state, the Song of Time blocks, timed doors | each game's own | not done |
 - **A floor switch pressed in one game is down in every game** (`dll/step_switch.{hpp,cpp}`, `dll/upstream.cpp` `OnStepSelector`). A research sub-agent read this from the switch's AI file and the lifted code (not from a run):
   - The step switch decides with its selector `SelectorSwitchStepBootup` (evaluate main+0x11a4920, x0 = the node, actor `[[[node+8]+8]+0x1f0]`). It goes to its On child (`Button_Pushed`, logic output `OnState`, which the room uses) when the button's slider is at its bottom, or when its ForceOn input is set (a bool byte at `[node+0x58]`). Its current child is the byte at +0x1e and the On child's index the byte at +0x68.
   - A hook on that call reads whether our switch is On and sends it as `PLAYER_EXTRA` kind 3 (u8 pressed, u64 placement hash, scene). It is sent on each change and again every 2 s while pressed.

@@ -24,6 +24,7 @@
 #include "coop_hold.h"
 #include "coop_hook.h"
 #include "coop_objects_sync.h"
+#include "coop_ocarina_sound.h"
 #include "coop_puppet.h"
 #include "coop_pose.h"
 #include "coop_world.h"
@@ -549,9 +550,33 @@ std::atomic<std::uint64_t> g_own_heard{0};
 int g_emit_handle = 0;
 int g_own_debug = 0;
 
+// --- Our own Ocarina notes (lichii/hook/coop_ocarina_sound.h wants the pad's buttons word, which NX2navi does
+// not hand a plugin): the game's own note sound `Ocarina_<note>` that a sound user starts while our Link plays the
+// Ocarina is the note itself; the hook's sender is given the button of that note for a short while (PadButtons). ---
+std::atomic<bool> g_ocarina_playing{false};     // our Link's command is the Ocarina being played (each frame)
+std::atomic<std::uint64_t> g_ocarina_note{0};   // (steady ms << 8) | the note's index + 1
+std::atomic<bool> g_ocarina_notes_on{true};
+std::atomic<std::uint64_t> g_ocarina_notes_heard{0};
+constexpr std::uint64_t kOcarinaHoldMs = 300;
+void NoteOcarinaSound(const char* name) {
+    constexpr std::string_view kHead = "Ocarina_";
+    const std::string_view n(name);
+    if (n.substr(0, kHead.size()) != kHead) {
+        return;
+    }
+    for (std::uint8_t i = 1; i <= CoopOcarinaSound::kNoteCount; ++i) {
+        if (n.substr(kHead.size()) == CoopOcarinaSound::NoteName(i)) {
+            g_ocarina_note.store((SteadyMs() << 8) | i, std::memory_order_relaxed);
+            g_ocarina_notes_heard.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 void OnEmit(Nx2HookCall* call, void*) {
     const std::uint64_t user = call->x[0];
-    if (user == 0 || (user != g_own_user.load(std::memory_order_relaxed) && g_own_debug < 2)) {
+    const bool playing =
+        g_ocarina_notes_on.load(std::memory_order_relaxed) && g_ocarina_playing.load(std::memory_order_relaxed);
+    if (user == 0 || (user != g_own_user.load(std::memory_order_relaxed) && g_own_debug < 2 && !playing)) {
         return;
     }
     const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
@@ -564,7 +589,13 @@ void OnEmit(Nx2HookCall* call, void*) {
     if (!PuppetFx::SoundName(name)) {
         return;
     }
+    if (playing) {
+        NoteOcarinaSound(name);
+    }
     if (user != g_own_user.load(std::memory_order_relaxed)) {
+        if (g_own_debug < 2) {
+            return;
+        }
         if (g_log != nullptr) {  // OOT_COOP_DEBUG_OWN_SOUNDS=2: every user's
             g_log((std::string("sound: another user ") + std::to_string(user) + " starts '" + name + "'").c_str());
         }
@@ -1053,6 +1084,8 @@ void AskFanfare(int type) {
 int TakeItemDone() { return g_item_done.exchange(0); }
 void NoteEvent(bool event) { g_item_event = event; }
 void NoteInGame(bool in_game) { g_presence_in_game = in_game; }
+void NoteOcarina(bool playing) { g_ocarina_playing = playing; }
+std::uint64_t OcarinaNotesHeard() { return g_ocarina_notes_heard.load(); }
 std::uint64_t SwitchCalls() { return g_switch_calls.load(std::memory_order_relaxed); }
 
 void PuppetSound(std::uint8_t player, const std::string& asset,
@@ -1290,8 +1323,22 @@ void Log(const std::string& line) {
         Overlay::Notice(*line);
     }
 }
-bool PadButtons(std::uint64_t&) {
-    return false;  // NX2navi hands a plugin button events, not the word: own Ocarina notes are not sent yet
+bool PadButtons(std::uint64_t& buttons) {
+    // The note our game sounded last (OnEmit), as the button that plays it, for kOcarinaHoldMs.
+    using namespace CoopNx2navi::Up;
+    buttons = 0;
+    const std::uint64_t v = g_ocarina_note.load(std::memory_order_relaxed);
+    if (v != 0 && SteadyMs() - (v >> 8) < kOcarinaHoldMs) {
+        switch (v & 0xff) {
+        case 4: buttons = CoopOcarinaSound::kButtonL; break;
+        case 7: buttons = CoopOcarinaSound::kButtonR; break;
+        case 11: buttons = CoopOcarinaSound::kButtonY; break;
+        case 13: buttons = CoopOcarinaSound::kButtonX; break;
+        case 16: buttons = CoopOcarinaSound::kButtonA; break;
+        default: break;  // a bent note: the five buttons only
+        }
+    }
+    return true;
 }
 }  // namespace CoopRuntime
 

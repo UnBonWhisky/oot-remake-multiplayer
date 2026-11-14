@@ -81,7 +81,9 @@ void AskItemScene(const std::string& actor, const std::array<float, 3>& at);
 void AskFanfare(int type);
 int TakeItemDone();          // 0 nothing, 1 the scene played, 2 it failed
 void NoteEvent(bool event);  // our Link is in an event (each frame)
-void NoteInGame(bool in_game);  // our Link is read (each frame): not the title screen or a load
+void NoteInGame(bool in_game);
+void NoteOcarina(bool playing);       // our Link plays the Ocarina now (each frame): its note sounds are our notes
+std::uint64_t OcarinaNotesHeard();    // note sounds of ours taken so far  // our Link is read (each frame): not the title screen or a load
 // A player was struck: their puppet's model turns red for a moment as the game's own Link does
 // (puppet_fx.hpp). Any thread.
 void PuppetHurt(std::uint8_t player);

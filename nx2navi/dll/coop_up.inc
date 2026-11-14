@@ -445,6 +445,8 @@ private:
         const bool event = reading && reading->event_running.value_or(false);
         CoopNx2navi::Up::NoteEvent(event);
         CoopNx2navi::Up::NoteInGame(reading.has_value());
+        CoopNx2navi::Up::NoteOcarina(reading && reading->animation &&
+                                     CoopOcarinaSound::Playing(reading->animation->name));
         const auto lines = CoopNx2navi::Overlay::TakeItemLines();
         if (!item_get_on_) {
             return;

@@ -506,11 +506,20 @@ public:
                              : "the event ended: Deku Scrub destroy flags from others go through");
             }
             const CoopScrubTalk::Hold talk = scrub_talk_;
-            hold.emplace(*quests, [link, scene, talk](coop::protocol::FlagKey key) {
+#if defined(LICHII_COOP_HOLD_FLAGS_ON_TITLE) && LICHII_COOP_HOLD_FLAGS_ON_TITLE
+            // No Link and no scene read: the title screen or file select. A write there goes
+            // into the title's own game data before any save is loaded (lost, docs/flags.md),
+            // and the NX2navi runs saw a joiner's title stop taking the player's presses after
+            // the host's save load was written into it. Named flags wait for our Link.
+            const bool title = !reading && !view.scene;
+#else
+            const bool title = false;
+#endif
+            hold.emplace(*quests, [link, scene, talk, title](coop::protocol::FlagKey key) {
                 if (key.kind != coop::protocol::FlagKeyKind::named || key.index != 0) {
                     return false;
                 }
-                if (talk.Holds(key.hash)) {
+                if (title || talk.Holds(key.hash)) {
                     return true;
                 }
                 if (!link || !scene) {
@@ -1589,6 +1598,7 @@ private:
     // Shared story cutscenes (coop_shared_scenes.h).
     bool shared_scenes_ = false;  // LICHII_COOP_SHARED_CUTSCENES, needs live events
     CoopSharedScenes::Joiner shared_joiner_;
+    bool test_event_done_ = false;  // LICHII_COOP_TEST_EVENT
 #if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
     CoopEvery::Every played_watch_{CoopEvery::kSecondUs};
     std::unordered_map<std::string, std::uint64_t> played_seen_;  // shared scene -> when its flag was first seen set
@@ -1734,6 +1744,28 @@ private:
                                  .value_or(false);
         });
 #endif
+        // Test only: LICHII_COOP_TEST_EVENT=<seconds>:<event flow name> asks our game for that
+        // event once, that many seconds after the hook started, as a story cutscene of our own
+        // (a two-game test of the shared cutscenes without walking into the scene's trigger).
+        if (!test_event_done_ && here.link && !here.scene.empty()) {
+            static const std::pair<std::uint64_t, std::string> want = [] {
+                const char* e = std::getenv("LICHII_COOP_TEST_EVENT");
+                const std::string v = e != nullptr ? e : "";
+                const auto colon = v.find(':');
+                if (colon == std::string::npos) return std::pair<std::uint64_t, std::string>{0, {}};
+                return std::pair<std::uint64_t, std::string>{std::strtoull(v.c_str(), nullptr, 10) * 1'000'000ull,
+                                                             v.substr(colon + 1)};
+            }();
+            static const std::uint64_t started_us = now_us;
+            if (want.second.empty()) {
+                test_event_done_ = true;
+            } else if (now_us - started_us >= want.first) {
+                test_event_done_ = true;
+                LOG_INFO(Core, "coop: test: asking our game for the event {} (LICHII_COOP_TEST_EVENT)", want.second);
+                std::lock_guard lock(live_mutex_);
+                live_requester_.Want(want.second, here.scene);
+            }
+        }
         for (const auto& line : shared_joiner_.TakeNotes()) {
             LOG_INFO(Core, "coop: cutscene: {}", line);
         }
