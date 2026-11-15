@@ -285,6 +285,12 @@ What the user asked after the afternoon's runs, and what is done now. Every run 
   - Now the note is emitted on the game's `Ocarina` user itself. For that note its performer is the friend's puppet (main+0x335b3f0, the call the game uses for our Link), and our Link again right after.
   - Limit: a note still sounding when the performer goes back follows our Link.
   - Run `ep22`, the host's log: each of the joiner's notes is now in the Ocarina user's list of playing sounds right after its emit (`the Ocarina user now plays: Ocarina_B`, `Ocarina_HighD`, `Ocarina_A`). **Nobody listened**: that it comes from the puppet's head, and how loud it is by distance, is not measured.
+- **One talker per NPC on the exit Kokiri: still not seen working** (runs `tk3` to `tk8`, `launcher-test	k8-sheet.png`).
+  - Since he is shared, both games' logs have him at the same place (`tk5`: -80.82 115.56 -34.39 and -80.79 115.56 -34.41; `tk8`: -80.62 115.61 / 115.74 -35.09).
+  - In `tk8` the host stands in front of him and talks ("Salut ! Alors, c'est comment, dehors ?"). But in the joiner's game, which held the copy, he is not drawn: the joiner gets the game's "A Parler" prompt beside the host's puppet, with no Kokiri in the picture. When the host's talk starts, the copy plays the owner's `Talk` and then leaves the joiner's actor walk (`share gone ... left`).
+  - The joiner's A presses during the host's talk then asked for no talk, so the hook saw nothing to refuse and no banner showed.
+  - So a shared NPC copy (`objects_npcs`) is not shown in the non-owner game, at least this one. That is the next thing to fix, before the refusal can be seen. The banner's texts are unit-tested only: "<name> is already talking to this NPC", "<nom> parle déjà à ce personnage".
+  - In `tk5` the joiner's own talk to him ("Enfin tout le monde sauf Mido...") worked in the owner's game.
 - **Traffic counters**: `coop::net::Client::traffic()` counts messages and encoded bytes by type. Every 30 s the port logs `traffic: out ... KB/s ..., in ...` with the eight biggest types.
 - New test switches: `OOT_COOP_EPONA_NOW=0`, `OOT_COOP_OCARINA_PLAY=0`, `OOT_COOP_SCENES_EVERYONE=0` (the port no longer tells every game or makes the trip), `LICHII_COOP_SHARED_SCENES_EVERYONE=0`, `LICHII_COOP_TALKS=0`, `LICHII_COOP_DEBUG_POSE=1` (poses sent and received a second).
 - New scripts in `launcher-test`:
