@@ -881,6 +881,51 @@ void OnTalkRequest(Nx2HookCall* call, void*) {
     }
 }
 
+// --- The Hookshot and Longshot in a puppet's hand ---
+// Run eq4: a puppet given the Hookshot crashed its game 60 ms later, reading 0x7d8 in main+0x2e37c30. That function
+// (a held piece's, x0 = its component, the piece at [x0+0x18]) finds the piece's wearer and reads a u32 at +0x7d8 of
+// the wearer's part [[wearer+0x270]+0x358], which a player's Link has and a puppet has not (0 there), and hands it
+// to a parameter of the piece. The hook leaves the call out when the piece is in the hand of a puppet whose part is
+// 0, so the piece shows in the hand and only that parameter is not set. OOT_COOP_HELD_HOOKSHOT=0 puts the Hookshot
+// and Longshot out of puppets' hands again (the hook is not set).
+std::array<std::atomic<std::uint64_t>, 17> g_puppet_actors{};  // live puppets by player number (the frame step)
+std::atomic<std::uint64_t> g_hookshot_guarded{0};
+void OnHeldPieceWearer(Nx2HookCall* call, void*) {
+    const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
+    if (api == nullptr) {
+        return;
+    }
+    auto word = [api](std::uint64_t at) {
+        std::uint64_t v = 0;
+        return at >= 0x10000 && api->read(at, &v, 8) == 1 ? v : 0;
+    };
+    const std::uint64_t piece = word(call->x[0] + 0x18);
+    if (piece == 0) {
+        return;
+    }
+    namespace pa = CoopPuppet::addr;
+    for (const auto& slot : g_puppet_actors) {
+        const std::uint64_t actor = slot.load(std::memory_order_relaxed);
+        const std::uint64_t parts = actor != 0 ? word(actor + pa::kActorParts) : 0;
+        if (parts == 0 || word(parts + 0x358) != 0) {
+            continue;  // no puppet, or it has the part: the call is safe
+        }
+        const std::uint64_t eu = word(parts + pa::kPartsEquipmentUser);
+        for (std::uint64_t s = 0; eu != 0 && s < 8; ++s) {
+            const std::uint64_t holder = word(eu + pa::kEquipSlots + pa::kEquipSlotStride * s + pa::kEquipSlotHolder);
+            if (holder != 0 && word(holder + pa::kHolderActor) == piece) {
+                call->skip = 1;
+                call->x[0] = 0;  // one that answers: nothing / false
+                if (g_hookshot_guarded.fetch_add(1, std::memory_order_relaxed) == 0) {
+                    CoopRuntime::Log("held piece: a piece in a puppet's hand asks its wearer for a part a puppet has "
+                                     "not (main+0x2e37c30 and three more); those calls are left out for puppets");
+                }
+                return;
+            }
+        }
+    }
+}
+
 // --- A struck player's puppet turns red as the game's own Link does (puppet_fx.hpp) ---
 std::array<std::atomic<std::uint64_t>, 5> g_hurt_ms{};  // when each player was last struck (steady ms), 0 none
 std::array<std::uint8_t, 5> g_flash_state{};            // the calc thread: 1 while a ratio above 0 is written
@@ -889,6 +934,17 @@ bool g_blink = false;
 std::atomic<std::uint64_t> g_flashes{0};
 
 void FlashStep(CoopPuppet::Guest& guest, std::uint64_t now_ms) {
+    {
+        std::array<std::uint64_t, 17> live{};
+        for (const auto& slot : CoopPuppet::TheDirector().Slots()) {
+            if (slot.number < live.size() && slot.phase == CoopPuppet::Phase::live) {
+                live[slot.number] = slot.actor;
+            }
+        }
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            g_puppet_actors[i].store(live[i], std::memory_order_relaxed);
+        }
+    }
     for (const auto& slot : CoopPuppet::TheDirector().Slots()) {
         if (slot.number == 0 || slot.number >= g_hurt_ms.size()) {
             continue;
@@ -1064,6 +1120,19 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
         for (const std::uint64_t at : {0x266f8e0ull, 0x2670a60ull, 0xf0b190ull, 0xd73710ull, 0x1173c30ull, 0x6b1e30ull,
                                        0x1132250ull, 0x6ab6f0ull, 0x122750ull, 0x2e2ec00ull, 0x3b10100ull}) {
             api->hook_function(main_base + at, OnSignTrace, nullptr);
+        }
+    }
+    if (const char* e = std::getenv("OOT_COOP_HELD_HOOKSHOT"); e == nullptr || std::string_view(e) != "0") {
+        // Runs hq1, hq2: with only the first left out, the joiner died in the next one, main+0x2e37cb0 (called by
+        // the piece's update main+0x2e37af0 the same way, x0 = its component), reading 0x2c; run hq3, with both
+        // left out, in main+0x2e37eb0 reading 0x7d8. The four functions of that component that read the wearer's
+        // part (+0x358, then +0x7d8; found in the lifted code) are all guarded.
+        bool guarded = true;
+        for (const std::uint64_t at : {0x2e37c30ull, 0x2e37cb0ull, 0x2e37eb0ull, 0x2e38600ull}) {
+            guarded = api->hook_function(main_base + at, OnHeldPieceWearer, nullptr) > 0 && guarded;
+        }
+        if (guarded) {
+            CoopPuppet::SetNoHeldHookshot(false);  // the hook keeps the piece's call safe: in the hand again
         }
     }
     if (const char* e = std::getenv("OOT_COOP_TALK_LOCK"); e == nullptr || std::string_view(e) != "0") {

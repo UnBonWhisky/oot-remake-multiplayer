@@ -42,6 +42,29 @@ inline constexpr std::uint64_t kHandles = 0x100;
 inline constexpr std::uint64_t kBlock = 0x200;
 inline constexpr std::uint64_t kHoldMs = 4000;  // a note held longer than any song's with no word is let go
 
+// Since 2026-11-15 (run sp-oc1 and a research sub-agent reading the lifted code): an emit on the `Ocarina` user
+// gets no audio voice at all (the probe saw none in 1.2 s, near or far, performer kept or not): the game uses that
+// user only for whole melodies. Our own Link's single notes are played by the game's 2D sound player:
+// main+0xa44760(args) with args (0x28 bytes) = {+0 u8 0, +8 char* name, +0x10 u64 0, +0x18 float fade-in 0,
+// +0x1c float volume 1, +0x20 u32 0, +0x24 u32 ~0}; it returns a pooled sound object, valid while its u32 at +0x10
+// is the id it had at the start; its volume is the float at +0x64; main+0x3a49ea0(object) stops it. That player
+// has no 3D position, so the note's loudness is set here from the distance between the friend's puppet and our
+// Link (Gain), each frame while it sounds, and a note beyond kHearM is not played. No pan.
+inline constexpr std::uint64_t kStartNote = 0xa44760;
+inline constexpr std::uint64_t kStopNote = 0x3a49ea0;
+inline constexpr std::uint64_t kNoteId = 0x10;
+inline constexpr std::uint64_t kNoteVolume = 0x64;
+inline constexpr std::uint64_t kArgs = 0x1a0;  // in the scratch block, 0x28 bytes
+inline constexpr float kNearM = 4.0f;
+inline constexpr float kHearM = 40.0f;
+// The note's volume factor for a puppet `metres` from our Link: 1 within kNearM, falling to 0 at kHearM.
+inline float Gain(float metres) {
+    if (!(metres > kNearM)) return 1.0f;
+    if (metres >= kHearM) return 0.0f;
+    const float f = 1.0f - (metres - kNearM) / (kHearM - kNearM);
+    return f * f;
+}
+
 inline std::uint64_t AssetSlot(int note) { return kAssets + 8 * static_cast<std::uint64_t>(note - 1); }
 inline std::uint64_t HandleSlot(int player) { return kHandles + 8 * static_cast<std::uint64_t>(player); }
 

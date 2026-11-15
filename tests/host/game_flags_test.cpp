@@ -417,3 +417,41 @@ TEST_CASE("game flag store: the read cache reads what the plain path reads, and 
     CHECK(store.read({0x19, 0}) == protocol::FlagEntry{0x19, 0, protocol::FlagKind::boolean, 0});
   }
 }
+
+TEST_CASE("game flag store: the read cache's check compares each cached read with a plain one") {
+  struct On {
+    On() {
+      coop::host::set_flag_read_cache(true);
+      coop::host::set_flag_read_cache_check(true);
+      coop::host::drop_flag_read_cache();
+    }
+    ~On() {
+      coop::host::set_flag_read_cache(false);
+      coop::host::set_flag_read_cache_check(false);
+      coop::host::drop_flag_read_cache();
+    }
+  } on;
+  const auto before = coop::host::flag_read_cache_check();
+  auto w = game();
+  w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 1);
+  w.mem.put_u32(kIntEntries + 0x1c, 3);
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    CHECK(store.read({0x22, 0})->value == 3);
+    CHECK_FALSE(store.read({0x25, 0}));
+  }
+  auto now = coop::host::flag_read_cache_check();
+  CHECK(now.compared >= before.compared + 3);
+  CHECK(now.mismatches == before.mismatches);
+  {
+    // The game changes a value behind the frame's view (it never does inside one frame; the check would see it).
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 0);
+    CHECK(store.read({0x18, 0})->value == 1);  // the frame's view
+  }
+  now = coop::host::flag_read_cache_check();
+  CHECK(now.mismatches == before.mismatches + 1);
+  CHECK(now.last.find("cache has 1, plain has 0") != std::string::npos);
+}

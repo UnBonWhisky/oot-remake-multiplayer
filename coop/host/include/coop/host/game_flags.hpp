@@ -128,6 +128,7 @@ class GameFlagStore final : public FlagStore {
   struct Frame;
   std::shared_ptr<Frame> frame_;
   std::optional<std::optional<protocol::FlagEntry>> cached_read(FlagKey key);
+  std::optional<protocol::FlagEntry> plain_read(FlagKey key);
 };
 
 // The read cache, for every GameFlagStore from now on (off by default; the NX2navi port turns it on). With it, a
@@ -136,5 +137,14 @@ class GameFlagStore final : public FlagStore {
 // drop_flag_read_cache drops it all (a load, a scene change); the next read finds each place again.
 void set_flag_read_cache(bool on);
 void drop_flag_read_cache();
+// A debug check of the cache (off by default): with it, every read the cache answers is also read the plain way
+// and the two compared. The counts are kept for flag_read_cache_check().
+void set_flag_read_cache_check(bool on);
+struct FlagReadCacheCheck {
+  std::uint64_t compared = 0;    // reads the cache answered, read again the plain way
+  std::uint64_t mismatches = 0;  // of them, answers that differed
+  std::string last;              // the last mismatch, as text
+};
+FlagReadCacheCheck flag_read_cache_check();
 
 }  // namespace coop::host

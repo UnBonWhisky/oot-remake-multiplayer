@@ -25,8 +25,14 @@ public:
         CoopNx2navi::Up::Hooks hooks;
         hooks.frame = [](const std::optional<coop::host::PlayerReading>& reading, coop::host::Session* session,
                          void* user) { static_cast<Coop*>(user)->Frame(reading, session); };
-        hooks.event = [](const coop::net::Event& event, coop::net::Client&, void* user) {
+        hooks.event = [](const coop::net::Event& event, coop::net::Client& client, void* user) {
+            // One talker per NPC: the host's game decides (talk_lock.hpp); replies go with this client.
+            if (auto* talk = CoopNx2navi::Up::Talk()) {
+                talk->SetRoles(client.player_number(), client.host_number());
+            }
+            static_cast<Coop*>(user)->event_client_ = &client;
             static_cast<Coop*>(user)->OnEvent(event);
+            static_cast<Coop*>(user)->event_client_ = nullptr;
         };
         hooks.user = this;
         CoopNx2navi::Up::Configure(settings_, g_folder, LogLine, hooks);
@@ -423,6 +429,19 @@ private:
             return;
         }
         const std::uint64_t now = SteadyUs();
+        if (!talk_sender_set_) {
+            // The hook's ask to the host's game goes at once, from the game's thread (talk_lock.hpp).
+            talk_sender_set_ = true;
+            talk->SetSender([this](const CoopNx2navi::TalkLock::Note& n) {
+                if (coop::host::Session* s = session_.load(); s != nullptr && connected_.load()) {
+                    s->with_client([&](coop::net::Client& client) {
+                        client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                                CoopNx2navi::TalkLock::kExtraTalk,
+                                                                CoopNx2navi::TalkLock::Encode(n)});
+                    });
+                }
+            });
+        }
         talk->SetScene(scene_ ? *scene_ : std::string());
         talk->Event(reading && reading->event_running.value_or(false), now);
         for (const std::string& line : talk->TakeLines()) {
@@ -788,10 +807,23 @@ private:
                 } else if (extra->kind == CoopNx2navi::TalkLock::kExtraTalk) {
                     if (const auto n = CoopNx2navi::TalkLock::Decode(extra->data)) {
                         if (auto* talk = CoopNx2navi::Up::Talk()) {
-                            talk->Remote(extra->player_number, *n, SteadyUs());
-                            g_log.Line("talk: P%u %s NPC %#llx", extra->player_number,
-                                       n->talking ? "talks to" : "stopped talking to",
-                                       static_cast<unsigned long long>(n->hash));
+                            namespace TL = CoopNx2navi::TalkLock;
+                            const auto reply = talk->Remote(extra->player_number, *n, SteadyUs());
+                            if (reply && event_client_ != nullptr) {
+                                event_client_->send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                                                TL::kExtraTalk, TL::Encode(*reply)});
+                            }
+                            for (const std::string& line : talk->TakeLines()) {
+                                g_log.Line("%s", line.c_str());
+                            }
+                            if (n->kind == TL::kNote) {
+                                g_log.Line("talk: P%u %s NPC %#llx", extra->player_number,
+                                           n->talking ? "talks to" : "stopped talking to",
+                                           static_cast<unsigned long long>(n->hash));
+                            } else if (n->kind != TL::kAsk) {
+                                g_log.Line("talk: the host's game %s P%u's talk to NPC %#llx", n->kind == TL::kGrant
+                                           ? "granted" : "refused", n->target, static_cast<unsigned long long>(n->hash));
+                            }
                         }
                     }
                 } else if (extra->kind == Fx::kExtraMagic) {
@@ -824,6 +856,8 @@ private:
     CoopNx2navi::Settings settings_;
     std::string welcome_;
     std::atomic<coop::host::Session*> session_{nullptr};  // the hook's, alive until Up::Stop
+    coop::net::Client* event_client_ = nullptr;
+    bool talk_sender_set_ = false;  // during OnEvent (network thread, under the session's lock)
     std::atomic<bool> connected_{false};
     std::atomic<bool> trusted_{false};
     std::uint64_t main_base_ = CoopNx2navi::kMainBase;

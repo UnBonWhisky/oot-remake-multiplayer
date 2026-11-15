@@ -2452,6 +2452,18 @@ TEST_CASE("epona: the owned-horse manager is asked for the horse once the hook w
 
 // ------------------------------- another player's Ocarina notes at their puppet (ocarina_play.hpp)
 
+TEST_CASE("ocarina play: a friend's note is full near, softer with distance, and silent beyond hearing") {
+    using namespace OcarinaPlay;
+    CHECK(Gain(0.0f) == 1.0f);
+    CHECK(Gain(kNearM) == 1.0f);
+    CHECK(Gain(10.0f) < 1.0f);
+    CHECK(Gain(20.0f) < Gain(10.0f));
+    CHECK(Gain(kHearM - 1.0f) > 0.0f);
+    CHECK(Gain(kHearM) == 0.0f);
+    CHECK(Gain(500.0f) == 0.0f);
+    CHECK(kArgs + 0x28 <= kBlock);  // the start's arguments fit the scratch block
+}
+
 TEST_CASE("ocarina play: each player's held note is stopped by the next, by a let-go, or after a silence") {
     using namespace OcarinaPlay;
     Held h;
@@ -2554,6 +2566,112 @@ TEST_CASE("talk lock: a second player's talk to the same NPC is refused while th
     c.Remote(3, Note{"S", 6, true}, kHoldUs);
     c.Remote(3, Note{"S", 6, false}, kHoldUs + 10);
     CHECK(c.Others(kHoldUs + 20).empty());  // ended
+}
+
+TEST_CASE("talk lock: the host's game decides, so two asks close together never both talk (run tk13)") {
+    using namespace CoopNx2navi::TalkLock;
+    const std::string scene = "KokiriForest_Child";
+    const std::uint64_t npc = 0x3612b617269aa6fbull;
+    // An ask, a grant and a refusal go through the wire form and back.
+    const Note ask{scene, npc, false, kAsk, 2, 0};
+    const auto ask_back = Decode(Encode(ask));
+    REQUIRE(ask_back);
+    CHECK(ask_back->kind == kAsk);
+    CHECK(ask_back->target == 2);
+    CHECK(ask_back->scene == scene);
+    CHECK(ask_back->hash == npc);
+    const auto deny_back = Decode(Encode(Note{scene, npc, false, kDeny, 2, 1}));
+    REQUIRE(deny_back);
+    CHECK(deny_back->kind == kDeny);
+    CHECK(deny_back->holder == 1);
+    CHECK_FALSE(Decode({5, 1, 0, 0, 0, 0, 0, 0, 0}));  // no such state
+    CHECK_FALSE(Decode({kAsk, 1, 0, 0, 0, 0, 0, 0, 0}));  // an ask without its target and holder
+
+    auto pair = [&](Lock& host, Lock& guest) {
+        host.SetScene(scene);
+        guest.SetScene(scene);
+        host.SetRoles(1, 1);
+        guest.SetRoles(2, 1);
+        // The guest's ask reaches the host's game, and its answer comes back (here at once).
+        guest.SetSender([&](const Note& n) {
+            if (const auto reply = host.Remote(2, *Decode(Encode(n)), 1'000'000)) {
+                guest.Remote(1, *Decode(Encode(*reply)), 1'000'000);
+            }
+        });
+    };
+    {
+        // The host pressed A first: the guest's ask, 33 ms later and before the host's note, is refused.
+        Lock host, guest;
+        pair(host, guest);
+        CHECK(host.Request(npc, 1'000'000) == 0);
+        CHECK(guest.Request(npc, 1'033'000) == 1);
+        CHECK(guest.TakeRefusals() == std::vector<std::uint8_t>{1});
+        CHECK(guest.Talking() == 0);
+        // The host's talk ends: the guest is granted.
+        host.Event(true, 1'100'000);
+        host.Event(false, 2'000'000);
+        guest.Remote(1, Note{scene, npc, false}, 2'000'000);
+        CHECK(guest.Request(npc, 2'100'000) == 0);
+        CHECK(guest.Talking() == npc);
+    }
+    {
+        // The guest's ask came first: granted; the host's own press then is refused.
+        Lock host, guest;
+        pair(host, guest);
+        CHECK(guest.Request(npc, 1'000'000) == 0);
+        CHECK(guest.Talking() == npc);
+        CHECK(host.Request(npc, 1'010'000) == 2);
+        CHECK(host.TakeRefusals() == std::vector<std::uint8_t>{2});
+        // Another NPC is free for the host.
+        CHECK(host.Request(0x77, 1'020'000) == 0);
+        // The guest's talk ends (its note 0): the NPC is free for the host again.
+        host.Remote(2, Note{scene, npc, false}, 3'000'000);
+        host.Event(false, 1'020'000 + kStartUs + 1);
+        CHECK(host.Request(npc, 3'100'000) == 0);
+    }
+    {
+        // Two guests: the host's game grants the first and refuses the second.
+        Lock host, g2, g3;
+        host.SetScene(scene);
+        host.SetRoles(1, 1);
+        for (auto* g : {&g2, &g3}) g->SetScene(scene);
+        g2.SetRoles(2, 1);
+        g3.SetRoles(3, 1);
+        g2.SetSender([&](const Note& n) {
+            if (const auto r = host.Remote(2, n, 1'000'000)) g2.Remote(1, *r, 1'000'000);
+        });
+        g3.SetSender([&](const Note& n) {
+            if (const auto r = host.Remote(3, n, 1'000'000)) {
+                g2.Remote(1, *r, 1'000'000);  // not for g2: ignored
+                g3.Remote(1, *r, 1'000'000);
+            }
+        });
+        CHECK(g2.Request(npc, 1'000'000) == 0);
+        CHECK(g3.Request(npc, 1'000'001) == 2);
+        CHECK(g2.Talking() == npc);
+    }
+    {
+        // No answer (an older host build, a slow link): after the hold, the talk goes ahead as before.
+        Lock guest;
+        guest.SetScene(scene);
+        guest.SetRoles(2, 1);
+        int asks = 0;
+        guest.SetSender([&](const Note&) { ++asks; });
+        CHECK(guest.Request(npc, 1'000'000, 2'000) == 0);
+        CHECK(asks == 1);
+        bool said = false;
+        for (const auto& line : guest.TakeLines()) said = said || line.find("no answer") != std::string::npos;
+        CHECK(said);
+        // The host's game itself asks nobody.
+        Lock host;
+        host.SetScene(scene);
+        host.SetRoles(1, 1);
+        host.SetSender([&](const Note&) { ++asks; });
+        CHECK(host.Request(npc, 1'000'000) == 0);
+        CHECK(asks == 1);
+        // An ask that reaches a game that is not the host's gets no answer from it.
+        CHECK_FALSE(guest.Remote(3, Note{scene, 9, false, kAsk, 3, 0}, 1'000'000));
+    }
 }
 
 TEST_CASE("overlay: another player's quest step becomes a notice line") {

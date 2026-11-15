@@ -415,6 +415,20 @@ public:
             return on;
         }();
         (void)flag_cache_on;
+        // LICHII_COOP_FLAG_READ_CACHE_CHECK=1 (a debug mode): every read the cache answers is read again the plain
+        // way and compared; a line every 30 s gives the counts.
+        static const bool flag_cache_check = [] {
+            const char* e = std::getenv("LICHII_COOP_FLAG_READ_CACHE_CHECK");
+            const bool on = e != nullptr && std::string_view(e) == "1";
+            coop::host::set_flag_read_cache_check(on);
+            return on;
+        }();
+        if (flag_cache_check && view.at - flag_check_said_ >= std::chrono::seconds(30)) {
+            flag_check_said_ = view.at;
+            const auto c = coop::host::flag_read_cache_check();
+            LOG_INFO(Core, "coop: flag read cache check: {} cached reads compared with plain ones, {} differed{}{}",
+                     c.compared, c.mismatches, c.last.empty() ? "" : "; last: ", c.last);
+        }
 #endif
         // With the flag read cache: the flags' places are found again after a load or a scene change.
         if (!reading || view.scene != flag_cache_scene_) {
@@ -1651,6 +1665,7 @@ private:
 #endif
     CoopLiveEvents::StartWatch story_watch_;  // our own story cutscene starts
     std::optional<std::string> flag_cache_scene_;  // the scene the flag read cache was filled in
+    Clock::time_point flag_check_said_{};  // LICHII_COOP_FLAG_READ_CACHE_CHECK: the last counts line
     std::vector<coop::protocol::DungeonEvent> story_events_in_;  // under dungeon_events_mutex_  // deku-dungeon-2: our own gimmick event starts
     std::mutex dungeon_events_mutex_;         // DUNGEON_EVENT from the network thread
     std::vector<coop::protocol::DungeonEvent> dungeon_events_in_;

@@ -178,6 +178,7 @@ struct Glue {
         std::string start;
     };
     std::optional<Scene> test_scene;
+    std::vector<Scene> test_scenes_after;  // the next ones, in order (OOT_COOP_TEST_SCENE with ';')
     std::uint64_t scene_in_game_us = 0;
 
 #if defined(__GNUC__)
@@ -320,6 +321,10 @@ void Logic(Glue& g, CoopPuppet::Guest& guest, std::uint64_t main) {
             g.saved_start.reset();  // the game takes the request and empties it itself
             g.saved_read = false;
             g.test_scene.reset();
+            if (!g.test_scenes_after.empty()) {
+                g.test_scene = g.test_scenes_after.front();
+                g.test_scenes_after.erase(g.test_scenes_after.begin());
+            }
         }
     }
 
@@ -544,20 +549,32 @@ void TestGoto(std::string_view spec) {
 }
 
 void TestScene(std::string_view spec) {
+    // "<seconds>:<scene>:<start>", or several separated by ';' (seconds counted from the first time in the game).
     Glue& g = TheGlue();
-    const std::string text(spec);
-    const auto first = text.find(':');
-    const auto second = first == std::string::npos ? first : text.find(':', first + 1);
-    if (second == std::string::npos || second + 1 >= text.size()) {
+    std::vector<Glue::Scene> all;
+    std::string rest(spec);
+    while (!rest.empty()) {
+        const auto end = rest.find(';');
+        const std::string text = rest.substr(0, end);
+        rest = end == std::string::npos ? std::string() : rest.substr(end + 1);
+        const auto first = text.find(':');
+        const auto second = first == std::string::npos ? first : text.find(':', first + 1);
+        if (second == std::string::npos || second + 1 >= text.size()) {
+            continue;
+        }
+        Glue::Scene scene;
+        scene.after_us = static_cast<std::uint64_t>(std::atof(text.substr(0, first).c_str()) * 1e6);
+        scene.scene = text.substr(first + 1, second - first - 1);
+        scene.start = text.substr(second + 1);
+        g.Log("teleport: a test scene change of our own game to %s at %s (OOT_COOP_TEST_SCENE)",
+              scene.scene.c_str(), scene.start.c_str());
+        all.push_back(std::move(scene));
+    }
+    if (all.empty()) {
         return;
     }
-    Glue::Scene scene;
-    scene.after_us = static_cast<std::uint64_t>(std::atof(text.substr(0, first).c_str()) * 1e6);
-    scene.scene = text.substr(first + 1, second - first - 1);
-    scene.start = text.substr(second + 1);
-    g.Log("teleport: a test scene change of our own game to %s at %s (OOT_COOP_TEST_SCENE)",
-          scene.scene.c_str(), scene.start.c_str());
-    g.test_scene = std::move(scene);
+    g.test_scene = all.front();
+    g.test_scenes_after.assign(all.begin() + 1, all.end());
 }
 
 bool OnChat(std::string_view text, coop::host::Session& session) {

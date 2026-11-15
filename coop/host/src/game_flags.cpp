@@ -4,7 +4,9 @@
 #include <atomic>
 #include <array>
 #include <bit>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -432,6 +434,9 @@ bool GameFlags::set_key64(WritableGameMemory& m, std::uint64_t key, bool value) 
 namespace {
 
 std::atomic<bool> g_read_cache{false};
+std::atomic<bool> g_read_check{false};
+std::mutex g_check_mutex;
+FlagReadCacheCheck g_check;
 
 // A table's place cache: hash (or 64-bit key) -> entry index, -1 for "not in this table". Valid while the
 // table's slots (or records) pointer, capacity and count are what they were when it was filled.
@@ -503,6 +508,13 @@ bool read_queue(GameMemory& m, std::uint64_t mgr, std::uint64_t cap_at, std::uin
 }  // namespace
 
 void set_flag_read_cache(bool on) { g_read_cache.store(on, std::memory_order_relaxed); }
+
+void set_flag_read_cache_check(bool on) { g_read_check.store(on, std::memory_order_relaxed); }
+
+FlagReadCacheCheck flag_read_cache_check() {
+  std::lock_guard lock(g_check_mutex);
+  return g_check;
+}
 
 void drop_flag_read_cache() {
   t_bool_places = {};
@@ -641,8 +653,29 @@ std::optional<std::optional<protocol::FlagEntry>> GameFlagStore::cached_read(Fla
 
 std::optional<protocol::FlagEntry> GameFlagStore::read(FlagKey key) {
   if (g_read_cache.load(std::memory_order_relaxed)) {
-    if (auto cached = cached_read(key)) return *cached;
+    if (auto cached = cached_read(key)) {
+      if (g_read_check.load(std::memory_order_relaxed)) {
+        const auto plain = plain_read(key);
+        const bool same = plain.has_value() == cached->has_value() &&
+                          (!plain || (plain->kind == (*cached)->kind && plain->value == (*cached)->value));
+        std::lock_guard lock(g_check_mutex);
+        ++g_check.compared;
+        if (!same) {
+          ++g_check.mismatches;
+          char text[160];
+          std::snprintf(text, sizeof text, "flag %08x/%016llx: cache %s %u, plain %s %u", key.hash,
+                        static_cast<unsigned long long>(key.key), *cached ? "has" : "none",
+                        *cached ? (*cached)->value : 0u, plain ? "has" : "none", plain ? plain->value : 0u);
+          g_check.last = text;
+        }
+      }
+      return *cached;
+    }
   }
+  return plain_read(key);
+}
+
+std::optional<protocol::FlagEntry> GameFlagStore::plain_read(FlagKey key) {
   GameFlags flags(memory_);
   protocol::FlagEntry e{key, protocol::FlagKind::boolean, 0};
   if (key.kind == FlagKeyKind::key64) {

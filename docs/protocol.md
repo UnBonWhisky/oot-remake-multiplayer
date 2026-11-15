@@ -451,7 +451,7 @@ Type 900. Types 900 to 909 are kept for the NX2navi port ([nx2navi/README.md](..
 | size | `u8` | 0 to 96 |
 | data | `size` bytes | |
 
-Kinds of the NX2navi port: 1 a sound the sender's Link started (data: the asset's name), 2 the sender's magic (`u16` now, `u16` most, little endian), 3 a floor switch the sender's game holds down (`u8` pressed, `u64` placement hash, the scene's name), 4 a footstep-like sound with the sound user's properties that choose its variation (`u8` name length, the name, `u8` count, then per property `u8` index and `u32` value).
+Kinds of the NX2navi port: 1 a sound the sender's Link started (data: the asset's name), 2 the sender's magic (`u16` now, `u16` most, little endian), 3 a floor switch the sender's game holds down (`u8` pressed, `u64` placement hash, the scene's name), 4 a footstep-like sound with the sound user's properties that choose its variation (`u8` name length, the name, `u8` count, then per property `u8` index and `u32` value). 5 a talk to an NPC (`nx2navi/dll/talk_lock.hpp`): `u8` state, `u64` the NPC's placement hash, then for states 2 to 4 `u8` target and `u8` holder, then the scene's name. States: 0 the sender stopped talking to it, 1 talks to it (again every 2 s), 2 asks the host's game for it (target = the asker), 3 the host's game grants it to the target, 4 refuses it to the target because `holder` talks to it. A build from before 2026-11-15 drops states 2 to 4 (it reads 0 and 1 only), so its talks go ahead after the asker's 150 ms wait. 6 another player's story cutscene start (`nx2navi/dll/story_start.hpp`).
 
 ### Boss rooms (`BOSS_ROOM`)
 
