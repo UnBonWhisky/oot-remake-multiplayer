@@ -270,12 +270,29 @@ What the user asked after the afternoon's runs, and what is done now. Every run 
 - **Four more quests shared by their end** (`LICHII_COOP_QUEST_ENDS=1` in this build only): Get_StoneOfFire, SageOfShadow, SageOfSpirit and SageOfWater, `complete_only` as Get_Epona.
   - Their steps branch, so they stay each player's own on purpose.
   - A Complete in any game is Complete in all, so the world is open for everyone.
-- New test switches: `OOT_COOP_EPONA_NOW=0`, `OOT_COOP_OCARINA_PLAY=0`, `OOT_COOP_SCENES_EVERYONE=0` (the port no longer tells every game or makes the trip), `LICHII_COOP_SHARED_SCENES_EVERYONE=0`, `LICHII_COOP_TALKS=0`.
+- **Cutscenes for everyone, seen** (runs `ct4`, `ct6`, `ct5`):
+  - `ct4`: the joiner stood 260 m from the host when the host's story cutscene started. The host's game refused the trip while its own scene played (`P1 is busy`, asked every 15 s), so the joiner arrived and played the scene only after the host's scene ended, 1 min 45 s later.
+  - Since then, a starter in our own scene is joined by moving beside them directly (`Teleport::MoveNear`). Their game is not asked.
+  - `ct6` (`launcher-test\ct6-sheet.png`): the joiner, 259 m away, stood 1.7 m from the host 0.08 s after the start and played the scene with them. Afterwards they stood 6 m apart.
+  - `ct5`: the joiner joined at once (both pictures show the same flight). The pause-menu press meant to make it busy did not open the menu, so the 180 s wait of a busy game was not exercised.
+  - A start that arrives with its own "played" flag was joined every time (`ct1`, `ct4` to `ct6`), but no run set that flag before the start on purpose.
+- **Smoother puppets** (`LICHII_COOP_POSE_SEND_HZ=30`, `LICHII_COOP_POSE_SEND_BONES=128` in this build only; upstream sends 15 a second with 48 bones).
+  - A player report after the merge of upstream 0.10.1: the other Links moved choppily. Upstream sends only the 48 bones that changed most of Link's roughly 309 moving ones, 15 times a second, and the others catch up later.
+  - Run `eq1` (the build before) received 15 poses a second. Run `eq2` received 29 to 30.
+  - The host's present-time frame went from 2.96 to 3.19 ms.
+  - About 70 KB/s per player, against upstream's 13, by the constants; `eq3` measures it.
+- **The Ocarina, corrected** (run `ep21`). A note emitted on the puppet's own sound user was accepted (an event came back), but that user then played nothing, so the notes were most likely not heard.
+  - Now the note is emitted on the game's `Ocarina` user itself. For that note its performer is the friend's puppet (main+0x335b3f0, the call the game uses for our Link), and our Link again right after.
+  - Limit: a note still sounding when the performer goes back follows our Link.
+  - Run `ep22`, the host's log: each of the joiner's notes is now in the Ocarina user's list of playing sounds right after its emit (`the Ocarina user now plays: Ocarina_B`, `Ocarina_HighD`, `Ocarina_A`). **Nobody listened**: that it comes from the puppet's head, and how loud it is by distance, is not measured.
+- **Traffic counters**: `coop::net::Client::traffic()` counts messages and encoded bytes by type. Every 30 s the port logs `traffic: out ... KB/s ..., in ...` with the eight biggest types.
+- New test switches: `OOT_COOP_EPONA_NOW=0`, `OOT_COOP_OCARINA_PLAY=0`, `OOT_COOP_SCENES_EVERYONE=0` (the port no longer tells every game or makes the trip), `LICHII_COOP_SHARED_SCENES_EVERYONE=0`, `LICHII_COOP_TALKS=0`, `LICHII_COOP_DEBUG_POSE=1` (poses sent and received a second).
 - New scripts in `launcher-test`:
   - `ep2_run.sh`, `ep3_run.sh`: Epona ridden.
   - `bl2_run.sh`: the gate both ways. To walk forward, push the stick up (+32767).
   - `tk2_run.sh`: one talker per NPC.
   - `ct2_run.sh`: a player far away when the scene starts. `ct3_run.sh`: a busy player.
+  - `eq_run.sh`: held items and pose smoothness. `tk3_run.sh`: one talker per NPC, on the exit Kokiri at his place read from the log.
   - `cs_chain2.sh` to `cs_chain4.sh`.
 
 ## Build
