@@ -423,6 +423,8 @@ void Client::on_receive(const std::uint8_t* data, std::size_t size,
     ++rejected_;
     return;
   }
+  ++traffic_.received_count[message.index()];
+  traffic_.received_bytes[message.index()] += size;
 
   // The server pings from its side too; answer whenever there is a peer.
   // At most kPongBurst at once, then one per kPongIntervalUs: a PING flood
@@ -749,7 +751,10 @@ bool Client::answer_challenge(const proto::JoinChallenge& challenge,
 bool Client::send_raw(const proto::Message& message, std::uint8_t channel) {
   std::vector<std::uint8_t> bytes;
   if (proto::encode(message, bytes) != proto::Error::none) return false;
-  return send_packet(bytes, channel);
+  if (!send_packet(bytes, channel)) return false;
+  ++traffic_.sent_count[message.index()];
+  traffic_.sent_bytes[message.index()] += bytes.size();
+  return true;
 }
 
 bool Client::send_packet(std::span<const std::uint8_t> plain, std::uint8_t channel) {

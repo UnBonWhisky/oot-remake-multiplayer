@@ -1090,7 +1090,10 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
                     g_story_out.push_back({scene, name});
                 }
             },
-            [](std::uint8_t player) { return CoopNx2navi::Teleport::GoTo(player); });
+            [](std::uint8_t player, const float* at) {
+                return at != nullptr ? CoopNx2navi::Teleport::MoveNear(at[0], at[1], at[2])
+                                     : CoopNx2navi::Teleport::GoTo(player);
+            });
     }
     CoopHook::Start();
     return true;

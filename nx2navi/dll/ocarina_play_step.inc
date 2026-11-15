@@ -11,7 +11,7 @@ struct OcarinaPlayBox {
     };
     std::vector<Want> wanted;  // any thread
     // the calc thread
-    enum class Step { idle, allocating, user, searching, stopping, emitting } step = Step::idle;
+    enum class Step { idle, allocating, user, searching, stopping, perform, emitting, perform_back } step = Step::idle;
     std::uint64_t block = 0;
     std::uint64_t user = 0;      // the game's `Ocarina` sound user
     std::uint64_t accessor = 0;  // its resource's accessor
@@ -25,6 +25,9 @@ struct OcarinaPlayBox {
     int play = 0;
     std::string said;
     std::uint64_t puppet_user = 0;  // the user the last note was emitted on
+    std::uint64_t module = 0;       // the game's Ocarina sound module
+    std::uint64_t back_to = 0;      // our own Link, the performer put back after a note
+    bool performer_set = false;     // the performer is the puppet for this note
 };
 OcarinaPlayBox g_oplay;
 constexpr int kOcarinaPlayOrder = 57;  // before the puppet voices (58)
@@ -97,15 +100,23 @@ std::optional<CoopPuppet::Call> OcarinaPlayStep(CoopPuppet::Guest& guest, bool a
                 v.busy = false;
             }
             break;
+        case OcarinaPlayBox::Step::perform:
+            v.performer_set = true;
+            break;
+        case OcarinaPlayBox::Step::perform_back:
+            v.busy = false;
+            break;
         case OcarinaPlayBox::Step::emitting:
             g_ocarina_played.fetch_add(1, std::memory_order_relaxed);
             if (g_voice_debug || g_ocarina_played.load() <= 20) {
                 // What the puppet's sound user plays right after: the game's own list of that user's events.
-                LOG_INFO(Core, "coop: ocarina-play: P{}'s puppet plays '{}' (emit gave {:#x}); its sound user now plays: {}",
+                LOG_INFO(Core, "coop: ocarina-play: P{}'s puppet plays '{}' (emit gave {:#x}); the Ocarina user now plays: {}",
                          v.player, CoopOcarinaSound::AssetName(v.play), result,
-                         CoopPuppetSound::Playing(guest, v.puppet_user));
+                         CoopPuppetSound::Playing(guest, v.user));
             }
-            v.busy = false;
+            if (v.back_to == 0) {
+                v.busy = false;
+            }
             break;
         case OcarinaPlayBox::Step::idle:
             break;
@@ -156,6 +167,7 @@ std::optional<CoopPuppet::Call> OcarinaPlayStep(CoopPuppet::Guest& guest, bool a
         }
         const std::uint64_t module = CoopPuppetSound::FindOcarinaModule(
             guest, main, CoopPuppetSound::SoundRoot(guest, main), nullptr);
+        v.module = module;
         const std::uint64_t wrapper = module != 0 ? word(module + O::kModuleWrapper) : 0;
         const std::uint64_t vtable = wrapper != 0 ? word(wrapper) : 0;
         const std::uint64_t get = vtable != 0 ? word(vtable + O::kWrapperGetUser) : 0;
@@ -197,23 +209,52 @@ std::optional<CoopPuppet::Call> OcarinaPlayStep(CoopPuppet::Guest& guest, bool a
             actor = slot.actor;
         }
     }
-    const std::uint64_t puppet_user = actor != 0 ? CoopPuppetSound::SoundUser(guest, actor) : 0;
-    if (puppet_user == 0) {
-        say(fmt::format("P{} has no live puppet with a sound user here: its note is not played", v.player));
+    // The emit on the puppet's own user is refused there (run ep21: its user played nothing after it): the game's
+    // Ocarina user places its notes at its performer's head, so the performer is the puppet for this note
+    // (main+0x335b3f0, as the game sets it for our Link), then our Link again.
+    if (actor == 0 || v.module == 0) {
+        say(fmt::format("P{} has no live puppet here: its note is not played", v.player));
         v.busy = false;
         return std::nullopt;
     }
-    const std::array<std::uint8_t, 8> fresh{0xff, 0, 0xff, 0xff, 0, 0, 0, 0};
-    if (!guest.Write(handle, fresh.data(), fresh.size())) {
+    if (g_ocarina_playing.load(std::memory_order_relaxed)) {
+        say("our own Link plays the Ocarina: another player's note waits");
         v.busy = false;
         return std::nullopt;
     }
-    c.function = main + O::kEmit;
-    v.puppet_user = puppet_user;
-    c.x[0] = puppet_user;
-    c.x[1] = v.block + O::AssetSlot(v.play);
-    c.x[2] = handle;
-    c.x[3] = 0;
-    v.step = OcarinaPlayBox::Step::emitting;
+    if (!v.performer_set) {
+        v.back_to = CoopPose::FindPlayer(guest, main);
+        c.function = main + O::kSetPerformer;
+        c.x[0] = v.module;
+        c.x[1] = actor;
+        v.step = OcarinaPlayBox::Step::perform;
+        return c;
+    }
+    if (v.step == OcarinaPlayBox::Step::idle && v.play != 0 && v.performer_set && v.puppet_user != actor) {
+        const std::array<std::uint8_t, 8> fresh{0xff, 0, 0xff, 0xff, 0, 0, 0, 0};
+        if (!guest.Write(handle, fresh.data(), fresh.size())) {
+            v.busy = false;
+            return std::nullopt;
+        }
+        v.puppet_user = actor;  // emitted for this puppet (the next frame step puts the performer back)
+        c.function = main + O::kEmit;
+        c.x[0] = v.user;
+        c.x[1] = v.block + O::AssetSlot(v.play);
+        c.x[2] = handle;
+        c.x[3] = 0;
+        v.step = OcarinaPlayBox::Step::emitting;
+        return c;
+    }
+    v.performer_set = false;
+    v.puppet_user = 0;
+    if (v.back_to == 0) {
+        v.busy = false;
+        return std::nullopt;
+    }
+    c.function = main + O::kSetPerformer;
+    c.x[0] = v.module;
+    c.x[1] = v.back_to;
+    v.back_to = 0;
+    v.step = OcarinaPlayBox::Step::perform_back;
     return c;
 }

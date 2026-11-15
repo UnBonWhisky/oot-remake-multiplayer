@@ -58,7 +58,13 @@ inline constexpr std::uint32_t kFlagMask = 0xffu << kFlagShift;
 inline constexpr std::size_t kMaxBones = 512;
 // Link's pose goes 15 times a second (30 before the 16-player work); the
 // receiver's Track blends the last two, so it still plays smooth.
+// A build may raise both for a small group (LICHII_COOP_POSE_SEND_HZ, LICHII_COOP_POSE_SEND_BONES; the NX2navi
+// build: 30 and 128, after a player report that the other Links moved choppily since the 16-player work).
+#ifdef LICHII_COOP_POSE_SEND_HZ
+inline constexpr int kSendHz = LICHII_COOP_POSE_SEND_HZ;
+#else
 inline constexpr int kSendHz = 15;
+#endif
 // At most this many of Link's bones go in one pose (about 300 move). First up
 // to kRefreshBones of those unsent for kBoneRefreshMs or longer, oldest first
 // (a lost or thinned pose, a late joiner: every bone goes again within about
@@ -67,7 +73,11 @@ inline constexpr int kSendHz = 15;
 // (Track::Fill).
 // About 48 x 18 bytes x 15/s = 13 KB/s per player, where every moving bone at
 // 30/s was about 160 KB/s.
+#ifdef LICHII_COOP_POSE_SEND_BONES
+inline constexpr std::size_t kMaxSendBones = LICHII_COOP_POSE_SEND_BONES;
+#else
 inline constexpr std::size_t kMaxSendBones = 48;
+#endif
 inline constexpr std::uint64_t kBoneRefreshMs = 500;
 inline constexpr std::size_t kRefreshBones = 8;
 // A bone is changed once a packed part moved more than this (in the packed

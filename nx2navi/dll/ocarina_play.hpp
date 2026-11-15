@@ -13,8 +13,12 @@
 //   resource can be emitted on the puppet's sound user, and the game's 3D sound system then places it at the
 //   puppet, with the user's own distance attenuation.
 // - A note is stopped with main+0x7cc120(&handle).
-// So: the note's asset is searched once in U's resource (main+0x43db00), emitted on the puppet's user with a
-// handle of that player's, and stopped by that handle when the player lets go (note 0), plays the next note, or
+// - Seen in run ep21: emitted on the puppet's own user, the note was taken (an event came back) but that user
+//   played nothing. So the note is emitted on U itself, with U's performer (module+0x48, set by main+0x335b3f0,
+//   which also looks up the instrument in the actor's equipment) made the puppet for that note and our Link again
+//   right after: the notes come from the puppet's head.
+// So: the note's asset is searched once in U's resource (main+0x43db00), emitted on U with a handle of that
+// player's, and stopped by that handle when the player lets go (note 0), plays the next note, or
 // sends nothing for kHoldMs. `OOT_COOP_OCARINA_PLAY=0` turns it off.
 #pragma once
 
@@ -28,6 +32,7 @@ inline constexpr std::uint64_t kWrapperGetUser = 0x20;  // vtable slot: U = f(R)
 inline constexpr std::uint64_t kSearchAsset = 0x43db00;
 inline constexpr std::uint64_t kEmit = 0x440630;
 inline constexpr std::uint64_t kKill = 0x7cc120;
+inline constexpr std::uint64_t kSetPerformer = 0x335b3f0;  // (module, actor): whose head the notes come from
 inline constexpr int kNotes = 19;
 inline constexpr int kPlayers = 17;
 // The scratch block: the asset name, the 19 assets once found, one handle per player.

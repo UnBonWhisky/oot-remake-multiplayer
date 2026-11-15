@@ -96,9 +96,10 @@ std::vector<PlayerRow> PlayerList();
 
 // Shared story cutscenes for every player, wherever (coop_shared_scenes.h, everyone mode; a build's choice).
 // `own_start`: our game started a shared story cutscene (the frame thread), for a build that tells every scene;
-// `bring`: take our game to that player now (true when a trip was asked). Before Start; null = none.
+// `bring`: take our game to that player now (true when a trip was asked); `at`: their place when they are in
+// our scene (null otherwise). Before Start; null = none.
 void SetStoryCallbacks(void (*own_start)(const std::string& scene, const std::string& name),
-                       bool (*bring)(std::uint8_t player));
+                       bool (*bring)(std::uint8_t player, const float* at));
 // Another player's story cutscene start, told by such a build (any thread).
 void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name);
 

@@ -95,7 +95,7 @@ namespace CoopHook {
 namespace {
 // Shared story cutscenes for every player, wherever (coop_shared_scenes.h, everyone mode): set by a build.
 void (*g_own_story_start)(const std::string& scene, const std::string& name) = nullptr;
-bool (*g_story_bring)(std::uint8_t player) = nullptr;
+bool (*g_story_bring)(std::uint8_t player, const float* at) = nullptr;
 
 
 // The game and build the addresses in coop/host are for.
@@ -1812,8 +1812,19 @@ private:
                 live_requester_.Want(want.second, here.scene);
             }
         }
+        // The starter's place when they are in our scene (a move there needs no answer from their game, which
+        // refuses a trip while its scene plays); else nothing: a trip to them.
+        const auto starter_at = [&](std::uint8_t who) -> std::optional<CoopSharedScenes::Vec3> {
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.number == who && r.scene == here.scene) {
+                    return r.position;
+                }
+            }
+            return std::nullopt;
+        };
         if (const auto to = shared_joiner_.TakeBring()) {
-            if (g_story_bring != nullptr && g_story_bring(*to)) {
+            const auto at = starter_at(*to);
+            if (g_story_bring != nullptr && g_story_bring(*to, at ? at->data() : nullptr)) {
                 LOG_INFO(Core, "coop: cutscene: going to player {} for their story cutscene", *to);
             } else {
                 LOG_INFO(Core, "coop: cutscene: cannot go to player {} for their story cutscene (no trip here)", *to);
@@ -1861,7 +1872,8 @@ private:
             }
             if (near || now_us >= regroup_until_us_) {
                 regroup_to_ = 0;
-            } else if (here.can_start && g_story_bring != nullptr && g_story_bring(regroup_to_)) {
+            } else if (here.can_start && g_story_bring != nullptr &&
+                       g_story_bring(regroup_to_, starter_at(regroup_to_) ? starter_at(regroup_to_)->data() : nullptr)) {
                 LOG_INFO(Core, "coop: cutscene: going to player {} where their scene left them", regroup_to_);
             }
         }
@@ -2199,7 +2211,7 @@ std::vector<PlayerRow> PlayerList() {
 }
 
 void SetStoryCallbacks(void (*own_start)(const std::string& scene, const std::string& name),
-                       bool (*bring)(std::uint8_t player)) {
+                       bool (*bring)(std::uint8_t player, const float* at)) {
     g_own_story_start = own_start;
     g_story_bring = bring;
 }

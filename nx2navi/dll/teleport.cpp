@@ -598,6 +598,19 @@ bool OnChat(std::string_view text, coop::host::Session& session) {
     return true;
 }
 
+bool MoveNear(float x, float y, float z) {
+    Glue& g = TheGlue();
+    std::lock_guard lock(g.mutex);
+    if (!g.configured || !g.game_thread) {
+        return false;
+    }
+    g.Log("teleport: moving beside a player in this scene (%.1f %.1f %.1f) for their story cutscene",
+          static_cast<double>(x), static_cast<double>(y), static_cast<double>(z));
+    g.move = CoopTeleport::Vec{x + 1.5f, y, z};
+    g.move_facing.reset();
+    return true;
+}
+
 bool GoTo(std::uint8_t player) {
     Glue& g = TheGlue();
     std::lock_guard lock(g.mutex);

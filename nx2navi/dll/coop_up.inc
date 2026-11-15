@@ -218,6 +218,7 @@ private:
             CoopNx2navi::Teleport::Frame(reading, *session, connected, server_now, true);
             SendExtras(*session, connected, reading.has_value());
             TalkFrame(*session, connected, reading);
+            TrafficReport(*session, connected);
         }
         ItemMoment(reading);
         for (const std::string& line : CoopNx2navi::Teleport::TakeLines()) {
@@ -347,6 +348,61 @@ private:
             CoopNx2navi::Objects::Brain::NoteOthers(living);
         }
         CoopNx2navi::Overlay::Publish(std::move(s));
+    }
+
+    // Every 30 s: what this game sent and received, by message type (the client's counters), for the traffic
+    // figures of the mod's optimisation (a line in the log, nothing decides on it).
+    template <std::size_t... I>
+    static std::uint16_t TypeAt(std::size_t i, std::index_sequence<I...>) {
+        std::uint16_t out = 0;
+        ((i == I ? (out = static_cast<std::uint16_t>(
+                        coop::protocol::type_of(coop::protocol::Message(std::in_place_index<I>))), 0)
+                 : 0), ...);
+        return out;
+    }
+    coop::net::Client::Traffic traffic_seen_{};
+    std::uint64_t traffic_us_ = 0;
+    void TrafficReport(coop::host::Session& session, bool connected) {
+        const std::uint64_t now = SteadyUs();
+        if (!connected || (traffic_us_ != 0 && now - traffic_us_ < 30'000'000)) {
+            return;
+        }
+        const double secs = traffic_us_ == 0 ? 0.0 : static_cast<double>(now - traffic_us_) / 1e6;
+        traffic_us_ = now;
+        coop::net::Client::Traffic t{};
+        session.with_client([&](coop::net::Client& client) { t = client.traffic(); });
+        if (secs > 0) {
+            constexpr std::size_t kTypes = std::variant_size_v<coop::protocol::Message>;
+            std::vector<std::pair<std::uint64_t, std::size_t>> by;
+            std::uint64_t sent = 0, got = 0, sent_n = 0, got_n = 0;
+            for (std::size_t i = 0; i < kTypes; ++i) {
+                const std::uint64_t b = (t.sent_bytes[i] - traffic_seen_.sent_bytes[i]) +
+                                        (t.received_bytes[i] - traffic_seen_.received_bytes[i]);
+                sent += t.sent_bytes[i] - traffic_seen_.sent_bytes[i];
+                got += t.received_bytes[i] - traffic_seen_.received_bytes[i];
+                sent_n += t.sent_count[i] - traffic_seen_.sent_count[i];
+                got_n += t.received_count[i] - traffic_seen_.received_count[i];
+                if (b != 0) by.emplace_back(b, i);
+            }
+            std::sort(by.rbegin(), by.rend());
+            std::string line;
+            for (std::size_t k = 0; k < by.size() && k < 8; ++k) {
+                const std::size_t i = by[k].second;
+                char part[96];
+                std::snprintf(part, sizeof part, " type %u: out %.1f KB/s (%.0f/s), in %.1f KB/s (%.0f/s);",
+                              TypeAt(i, std::make_index_sequence<kTypes>{}),
+                              static_cast<double>(t.sent_bytes[i] - traffic_seen_.sent_bytes[i]) / 1024.0 / secs,
+                              static_cast<double>(t.sent_count[i] - traffic_seen_.sent_count[i]) / secs,
+                              static_cast<double>(t.received_bytes[i] - traffic_seen_.received_bytes[i]) / 1024.0 / secs,
+                              static_cast<double>(t.received_count[i] - traffic_seen_.received_count[i]) / secs);
+                line += part;
+            }
+            g_log.Line("traffic: out %.1f KB/s in %.0f messages/s, in %.1f KB/s in %.0f messages/s (encoded, before "
+                       "encryption and ENet headers);%s",
+                       static_cast<double>(sent) / 1024.0 / secs, static_cast<double>(sent_n) / secs,
+                       static_cast<double>(got) / 1024.0 / secs, static_cast<double>(got_n) / secs, line.c_str());
+        }
+        traffic_seen_ = t;
     }
 
     // One talker per NPC (talk_lock.hpp): ours said to the others, theirs refuse ours here.
