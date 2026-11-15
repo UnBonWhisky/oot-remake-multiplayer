@@ -412,15 +412,25 @@ Every run below was on save copies, two games on this PC (one game for `sp-oc*` 
     | 25 m in front | 0.12 / 0.12 | 17 % |
     | 60 m in front | 0.02 / 0.02 (the mod plays nothing beyond 40 m) | 3 % |
 
-  - Each of the 24 notes started a voice 3 to 13 ms after its emit, with the same sample as our own note. The game's positional note call main+0x335aa30 (mode `c`) also made voices, but centred at every distance. Nobody listened.
+  - Each of the 24 notes started a voice 3 to 13 ms after its emit, with the same sample as our own note. The game's positional note call main+0x335aa30 (mode `c`) also made voices, but centred at every distance.
+  - Run `oc5` (two games, the joiner plays four notes at each of five places; `launcher-test\oc_audio.py` reads the host's own stereo output during each note, the notes found by their wave buffers in the host's audio trace):
+
+    | The joiner's puppet | Level of the note in the host's output | Left minus right |
+    |---|---|---|
+    | 2.5 m in front | -27.1 to -27.6 dB | 0 dB |
+    | 15 m in front | -39.4 to -39.5 dB | -0.3 to +2.2 dB |
+    | 5 m to the picture's right | -26.6 dB | -12 to -13 dB (right) |
+    | 5 m to the picture's left | -27.1 to -27.3 dB | +11 to +13 dB (left) |
+    | 60 m in front | no note played | |
+
+  - So the friend's notes are in the host's own sound output, from the puppet's side and softer with distance. Nobody listened.
 - **Cutscenes, cases not tried before** (runs `ct8`, `ct9`; Hyrule Field, the host's game asks itself for `Dm_HrlField_0000`):
   - A player in a menu (`ct8`, `launcher-test\ct8-sheet.png`): the joiner's pause menu was open when the host's scene started. Its log took the start at once (`playing it here too`), but the scene began in its game only when the menu closed, 58 s later; its picture then shows the same flight.
   - The played case (`ct9`): with `HavePlayedEvent.Dm_HrlField_0000` set in both saves 50 s before, the host's game was asked for the scene and played nothing, so no game was told; neither played it.
   - Not tried: a player in a talk, a player in a boss fight, a scene that gives an item or a quest step.
 - **Townspeople in Kakariko** (run `kk1`): both players arrived at Kakariko's entrance. The host's log shows 18 townspeople of Kakariko shared (`share vtable Npc_Hylia_...`), but the pictures from the entrance show none of them (`launcher-test\kk1-sheet.png`): not seen in pictures.
 - **The flag read cache over a long session** (run `ls1`, 33 min, `LICHII_COOP_FLAG_READ_CACHE_CHECK=1` in both games: every read the cache answered was read again the plain way and compared). Five area changes in both games (Gerudo Valley, Hyrule Field, Kakariko, Gerudo Valley, Hyrule Field), the host's Link dying at 06:57 (`Game Over`), the save loaded again by "continue" (`flags: save load seen`), and back to the joiner. **156,824,545 cached reads compared in the host's game and 158,417,691 in the joiner's: 0 differed.** No crash in either game.
-- **The mod with no session** (run `ns1`, `launcher-test
-s_run.py`: one game at a time, 150 s each, Hyrule Field, 30 frames a second cap; process figures at 60, 90 and 120 s):
+- **The mod with no session** (run `ns1`, `launcher-test\ns_run.py`: one game at a time, 150 s each, Hyrule Field, 30 frames a second cap; process figures at 60, 90 and 120 s):
 
   | Run | Threads | Private memory | Working set | Frame time (the 60 s line after the load) |
   |---|---|---|---|---|
