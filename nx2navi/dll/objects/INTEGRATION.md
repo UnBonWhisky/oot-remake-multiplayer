@@ -277,3 +277,7 @@ Since 21:00 of 2026-11-13 (nx2navi/README.md, "Since 21:00 of 2026-11-13"):
 - The walk hands the puppets' places to `WorldSync::NotePuppets`.
 - `coop_pose.{h,cpp}`: `FreezeOwnPose`, used by this port while it plays the game's item-get scene for another player's item.
 - Floor switches (`dll/step_switch.*`) and the item-get moment (`dll/item_get*`) are this port's own and do not touch this folder.
+
+Since 2026-11-15 (nx2navi/README.md, "Since the early morning of 2026-11-15"), two things of `lichii/hook/coop_objects.cpp` that this folder's copies meet:
+- `CoopObjects::SetTalkedNpcs(hashes)`: the port hands over, every frame, the NPCs (placement hashes) another player talks to (its talk lock). With `LICHII_COOP_NPC_COPY_NO_TALK=1` (this build only) our copy of such an NPC gets none of its owner's animations while that talk lasts, and no NPC copy gets `Talk*` animations. Without it, the exit Kokiri's copy left the game's actor list within a second of the owner's talk-start animation (runs `tk8`, `tk9`, `tk11`); with it, it stays (`tk12`).
+- `LICHII_COOP_TEST_NPC_COPY_FILE=<file>` (test only): the file's first two characters switch NPC copies' plays and place writes ("11", "01", "10", "00"), read once a second.

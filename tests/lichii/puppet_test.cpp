@@ -1661,6 +1661,22 @@ TEST_CASE("puppet gear: a PLAYER_EQUIP becomes the pieces, the sword hand's own 
     CHECK(GearOf(e)[0] == "Weapon_Sword_DekuStick");
 }
 
+TEST_CASE("puppet gear: the Hookshot leaves the hand only while a port says it must (NX2navi run eq4)") {
+    using namespace CoopPuppet;
+    coop::protocol::Equipment e;
+    e.held = "Weapon_Range_Hookshot";
+    e.tool = "Weapon_Range_Longshot";
+    SetNoHeldHookshot(true);  // a build that defines LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT, its call not guarded
+    CHECK_FALSE(GearOf(e)[kGearHeld]);
+    CHECK_FALSE(GearOf(e)[kGearTool]);
+    SetNoHeldHookshot(false);  // the port guards main+0x2e37c30, or a build without the define
+    CHECK(GearOf(e)[kGearHeld] == "Weapon_Range_Hookshot");
+    CHECK(GearOf(e)[kGearTool] == "Weapon_Range_Longshot");
+#if defined(LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT) && LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT
+    SetNoHeldHookshot(true);
+#endif
+}
+
 TEST_CASE("puppet gear: the Ocarina and its belt holder come from PLAYER_EQUIP's ocarina (issue 152)") {
     using namespace CoopPuppet;
     coop::protocol::Equipment e;

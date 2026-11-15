@@ -1,10 +1,16 @@
 #include "coop/host/game_flags.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <span>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 // Offsets: docs/flags.md, read from main of build e0f3ccfaf50065ae.
 namespace coop::host {
@@ -40,6 +46,12 @@ constexpr Table kString64{0x610, 0x618, 0x620, 0x62c, 0x108, 0, 0, 0, 0, 0};
 constexpr std::uint64_t kStringText = 0x68, kStringSize = 0x70;
 // The game's String64 buffers hold 64 bytes; more is not a String64.
 constexpr std::uint32_t kMaxString64Bytes = 64;
+// String64Array (type 17, M + 0x670): entries of 0x90, element count u32 at
+// +0x70, elements of 0x50 at *(+0x78), each a char* at +0 and its buffer
+// size u32 at +8 (0x329ced0 and 0xa7a860 read OwnedHorseList.ActorName so).
+constexpr Table kString64Array{0x670, 0x678, 0x680, 0x68c, 0x90, 0, 0, 0, 0, 0};
+constexpr std::uint64_t kStrArrayCount = 0x70, kStrArrayElems = 0x78, kStrElemSize = 0x50,
+                        kStrElemCap = 0x8;
 // BoolArray: entries of 0x40, element count u32 at +0x20, bits at *(+0x28).
 constexpr Table kBoolArray{0x70, 0x78, 0x80, 0x8c, 0x40, 0, 0, 0, 0, 0};
 constexpr std::uint64_t kArraySize = 0x20, kArrayBits = 0x28;
@@ -307,6 +319,58 @@ bool GameFlags::set_string64_now(WritableGameMemory& m, std::uint32_t hash,
   return m.write(*buffer, std::span<const std::uint8_t>(bytes.data(), text.size() + 1));
 }
 
+namespace {
+
+// Element `index` of String64Array `hash`: its buffer and buffer size.
+std::optional<std::pair<std::uint64_t, std::uint32_t>> string_array_element(GameMemory& m,
+                                                                            std::uint32_t hash,
+                                                                            std::uint32_t index) {
+  const auto mgr = manager(m);
+  if (!mgr) return std::nullopt;
+  const auto entry_index = find(m, *mgr, kString64Array, hash);
+  if (!entry_index) return std::nullopt;
+  const auto entries = read_ptr(m, *mgr + kString64Array.entries);
+  if (!entries) return std::nullopt;
+  const std::uint64_t entry = *entries + kString64Array.stride * *entry_index;
+  const auto count = read_u32(m, entry + kStrArrayCount);
+  const auto elems = read_ptr(m, entry + kStrArrayElems);
+  if (!count || !elems || index >= *count || *count > 4096) return std::nullopt;
+  const std::uint64_t elem = *elems + kStrElemSize * index;
+  const auto text = read_ptr(m, elem);
+  const auto size = read_u32(m, elem + kStrElemCap);
+  if (!text || !size || *size == 0 || *size > kMaxString64Bytes) return std::nullopt;
+  return std::make_pair(*text, *size);
+}
+
+}  // namespace
+
+std::optional<std::string> GameFlags::get_string64_array(std::uint32_t hash, std::uint32_t index) {
+  const auto at = string_array_element(memory_, hash, index);
+  if (!at) return std::nullopt;
+  std::array<std::uint8_t, kMaxString64Bytes> bytes{};
+  if (!memory_.read(at->first, std::span(bytes.data(), at->second))) return std::nullopt;
+  std::string out;
+  for (std::uint32_t i = 0; i < at->second; ++i) {
+    if (bytes[i] == 0) return out;
+    if (bytes[i] < 0x20 || bytes[i] > 0x7e) return std::nullopt;
+    out.push_back(static_cast<char>(bytes[i]));
+  }
+  return std::nullopt;
+}
+
+bool GameFlags::set_string64_array_now(WritableGameMemory& m, std::uint32_t hash,
+                                       std::uint32_t index, std::string_view text) {
+  if (text.size() + 1 > kMaxString64Bytes) return false;
+  for (const char ch : text) {
+    if (ch < 0x20 || ch > 0x7e) return false;
+  }
+  const auto at = string_array_element(m, hash, index);
+  if (!at || at->second < text.size() + 1) return false;
+  std::array<std::uint8_t, kMaxString64Bytes> bytes{};
+  std::copy(text.begin(), text.end(), bytes.begin());
+  return m.write(at->first, std::span<const std::uint8_t>(bytes.data(), text.size() + 1));
+}
+
 std::optional<GameFlags::QueueSizes> GameFlags::queue_sizes() {
   const auto mgr = manager(memory_);
   if (!mgr) return std::nullopt;
@@ -367,7 +431,251 @@ bool GameFlags::set_key64(WritableGameMemory& m, std::uint64_t key, bool value) 
                  true);
 }
 
+namespace {
+
+std::atomic<bool> g_read_cache{false};
+std::atomic<bool> g_read_check{false};
+std::mutex g_check_mutex;
+FlagReadCacheCheck g_check;
+
+// A table's place cache: hash (or 64-bit key) -> entry index, -1 for "not in this table". Valid while the
+// table's slots (or records) pointer, capacity and count are what they were when it was filled.
+template <typename Key>
+struct Places {
+  std::uint64_t mgr = 0, slots = 0;
+  std::uint32_t cap = 0, count = 0;
+  std::unordered_map<Key, std::int64_t> index;
+  void check(std::uint64_t m, std::uint64_t s, std::uint32_t c, std::uint32_t n) {
+    if (m != mgr || s != slots || c != cap || n != count) {
+      index.clear();
+      mgr = m, slots = s, cap = c, count = n;
+    }
+  }
+};
+thread_local Places<std::uint32_t> t_bool_places, t_int_places;
+thread_local Places<std::uint64_t> t_key_places;
+
+enum class Probe { found, absent, failed };
+
+// A table's entries array is read whole only up to this size.
+constexpr std::uint64_t kBulkMaxBytes = 4u << 20;
+
+// As find(), one read per slot, telling a real absence (an empty slot) from a failed read.
+Probe probe(GameMemory& m, std::uint64_t slots, std::uint32_t cap, std::uint32_t count, std::uint32_t hash,
+            std::uint32_t& index) {
+  if (hash == 0 || cap == 0) return Probe::absent;
+  const std::uint32_t start = hash % cap;
+  std::uint32_t i = start;
+  do {
+    std::array<std::uint8_t, 8> slot{};
+    if (!m.read(slots + 8ull * i, slot)) return Probe::failed;
+    std::uint32_t h = 0, at = 0;
+    std::memcpy(&h, slot.data(), 4);
+    std::memcpy(&at, slot.data() + 4, 4);
+    if (h == 0) return Probe::absent;
+    if (h == hash) {
+      if (at >= count) return Probe::failed;
+      index = at;
+      return Probe::found;
+    }
+    i = i + 1 >= cap ? 0 : i + 1;
+  } while (i != start);
+  return Probe::absent;
+}
+
+// The newest value queued for each id, from one read of the taken slots.
+bool read_queue(GameMemory& m, std::uint64_t mgr, std::uint64_t cap_at, std::uint64_t buf_at,
+                std::uint64_t word_at, std::uint64_t slot_size,
+                std::unordered_map<std::uint32_t, std::uint32_t>& out) {
+  const auto cap = read_u32(m, mgr + cap_at);
+  const auto buf = read_ptr(m, mgr + buf_at);
+  const auto word = read_u32(m, mgr + word_at);
+  if (!cap || !buf || !word) return false;
+  std::uint32_t taken = *word & kTakenMask;
+  if (taken > *cap) taken = *cap;
+  if (taken == 0) return true;
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(slot_size) * taken);
+  if (!m.read(*buf, bytes)) return false;
+  for (std::uint32_t i = 0; i < taken; ++i) {  // oldest first: the newest stays
+    std::uint32_t value = 0, id = 0;
+    std::memcpy(&value, bytes.data() + slot_size * i, 4);
+    std::memcpy(&id, bytes.data() + slot_size * i + 4, 4);
+    out[id] = value;
+  }
+  return true;
+}
+
+}  // namespace
+
+void set_flag_read_cache(bool on) { g_read_cache.store(on, std::memory_order_relaxed); }
+
+void set_flag_read_cache_check(bool on) { g_read_check.store(on, std::memory_order_relaxed); }
+
+FlagReadCacheCheck flag_read_cache_check() {
+  std::lock_guard lock(g_check_mutex);
+  return g_check;
+}
+
+void drop_flag_read_cache() {
+  t_bool_places = {};
+  t_int_places = {};
+  t_key_places = {};
+}
+
+struct GameFlagStore::Frame {
+  struct View {
+    bool ok = false;
+    std::uint64_t slots = 0, entries = 0;
+    std::uint32_t cap = 0, count = 0;
+    std::unordered_map<std::uint32_t, std::uint32_t> queued;
+    // The whole entries array, read at once the first time a value is wanted (a few hundred KB: cheaper than
+    // thousands of reads of one byte through the plugin interface). Empty when that read failed.
+    std::vector<std::uint8_t> bulk;
+    bool bulk_tried = false;
+  };
+  bool ok = false;
+  std::uint64_t mgr = 0;
+  View b, i, k;  // Bool, Int, 64-bit keys (slots = the records, cap unused)
+};
+
+std::optional<std::optional<protocol::FlagEntry>> GameFlagStore::cached_read(FlagKey key) {
+  const bool named = key.kind == FlagKeyKind::named && key.index == 0;
+  const bool key64 = key.kind == FlagKeyKind::key64 && key.table == 0;
+  if (!named && !key64) return std::nullopt;  // the plain path
+  if (!frame_) {
+    frame_ = std::make_shared<Frame>();
+    Frame& f = *frame_;
+    const auto mgr = manager(memory_);
+    if (!mgr) return std::nullopt;
+    f.mgr = *mgr;
+    const auto view = [&](const Table& t, Frame::View& v, Places<std::uint32_t>& places) {
+      const auto slots = read_ptr(memory_, f.mgr + t.slots);
+      const auto entries = read_ptr(memory_, f.mgr + t.entries);
+      const auto cap = read_u32(memory_, f.mgr + t.capacity);
+      const auto count = read_u32(memory_, f.mgr + t.count);
+      if (!slots || !entries || !cap || !count || *cap == 0) return;
+      v.slots = *slots, v.entries = *entries, v.cap = *cap, v.count = *count;
+      v.ok = read_queue(memory_, f.mgr, t.queue_cap, t.queue_buf, t.queue_word, t.slot_size, v.queued);
+      places.check(f.mgr, v.slots, v.cap, v.count);
+    };
+    view(kBool, f.b, t_bool_places);
+    view(kInt, f.i, t_int_places);
+    const auto count = read_u32(memory_, f.mgr + kKeyCount);
+    const auto records = read_ptr(memory_, f.mgr + kKeyRecords);
+    if (count && records && *count != 0 && *count <= 0x7fffffff) {
+      f.k.slots = *records, f.k.count = *count;
+      f.k.ok = read_queue(memory_, f.mgr, kKeyQueueCap, kKeyQueueBuf, kKeyQueueWord, 8, f.k.queued);
+      t_key_places.check(f.mgr, f.k.slots, 0, f.k.count);
+    }
+    f.ok = true;
+  }
+  Frame& f = *frame_;
+  if (!f.ok) return std::nullopt;
+  protocol::FlagEntry e{key, protocol::FlagKind::boolean, 0};
+  if (key64) {
+    if (!f.k.ok) return std::nullopt;
+    auto it = t_key_places.index.find(key.key);
+    if (it == t_key_places.index.end()) {
+      const auto at = find_key(memory_, f.mgr, key.key);
+      if (!at) return std::nullopt;  // absent or unread: the plain path says which
+      it = t_key_places.index.emplace(key.key, *at).first;
+    }
+    const auto index = static_cast<std::uint32_t>(it->second);
+    if (const auto q = f.k.queued.find(index); q != f.k.queued.end()) {
+      e.value = (q->second & 0xff) != 0 ? 1 : 0;
+      return std::optional<protocol::FlagEntry>(e);
+    }
+    const auto v = read_u8(memory_, f.k.slots + kKeyRecordSize * index + kKeyValue);
+    if (!v) return std::nullopt;
+    e.value = *v != 0 ? 1 : 0;
+    return std::optional<protocol::FlagEntry>(e);
+  }
+  // One entry's value: from the entries array read at once, or read alone.
+  const auto value = [&](Frame::View& v, std::uint64_t stride, std::uint64_t at, std::size_t size)
+      -> std::optional<std::uint32_t> {
+    if (!v.bulk_tried) {
+      v.bulk_tried = true;
+      const std::uint64_t bytes = stride * v.count;
+      if (bytes != 0 && bytes <= kBulkMaxBytes) {
+        v.bulk.resize(static_cast<std::size_t>(bytes));
+        if (!memory_.read(v.entries, v.bulk)) v.bulk.clear();
+      }
+    }
+    std::uint32_t out = 0;
+    if (!v.bulk.empty() && at + size <= v.bulk.size()) {
+      std::memcpy(&out, v.bulk.data() + at, size);
+      return out;
+    }
+    if (size == 1) {
+      const auto b = read_u8(memory_, v.entries + at);
+      if (!b) return std::nullopt;
+      return *b;
+    }
+    return read_u32(memory_, v.entries + at);
+  };
+  // A named flag: Bool first, then Int, as the plain path.
+  const auto place = [&](Frame::View& v, Places<std::uint32_t>& places) -> std::optional<std::int64_t> {
+    if (!v.ok) return std::nullopt;
+    if (const auto it = places.index.find(key.hash); it != places.index.end()) return it->second;
+    std::uint32_t index = 0;
+    switch (probe(memory_, v.slots, v.cap, v.count, key.hash, index)) {
+      case Probe::found: places.index.emplace(key.hash, index); return index;
+      case Probe::absent: places.index.emplace(key.hash, -1); return -1;
+      case Probe::failed: break;
+    }
+    return std::nullopt;
+  };
+  const auto b = place(f.b, t_bool_places);
+  if (!b) return std::nullopt;
+  if (*b >= 0) {
+    if (const auto q = f.b.queued.find(key.hash); q != f.b.queued.end()) {
+      e.value = (q->second & 0xff) != 0 ? 1 : 0;
+      return std::optional<protocol::FlagEntry>(e);
+    }
+    const auto v = value(f.b, kBool.stride, kBool.stride * static_cast<std::uint64_t>(*b) + kBool.value, 1);
+    if (!v) return std::nullopt;
+    e.value = *v != 0 ? 1 : 0;
+    return std::optional<protocol::FlagEntry>(e);
+  }
+  const auto i = place(f.i, t_int_places);
+  if (!i) return std::nullopt;
+  if (*i < 0) return std::optional<protocol::FlagEntry>();  // in neither table
+  e.kind = protocol::FlagKind::int32;
+  if (const auto q = f.i.queued.find(key.hash); q != f.i.queued.end()) {
+    e.value = q->second;
+    return std::optional<protocol::FlagEntry>(e);
+  }
+  const auto v = value(f.i, kInt.stride, kInt.stride * static_cast<std::uint64_t>(*i) + kInt.value, 4);
+  if (!v) return std::nullopt;
+  e.value = *v;
+  return std::optional<protocol::FlagEntry>(e);
+}
+
 std::optional<protocol::FlagEntry> GameFlagStore::read(FlagKey key) {
+  if (g_read_cache.load(std::memory_order_relaxed)) {
+    if (auto cached = cached_read(key)) {
+      if (g_read_check.load(std::memory_order_relaxed)) {
+        const auto plain = plain_read(key);
+        const bool same = plain.has_value() == cached->has_value() &&
+                          (!plain || (plain->kind == (*cached)->kind && plain->value == (*cached)->value));
+        std::lock_guard lock(g_check_mutex);
+        ++g_check.compared;
+        if (!same) {
+          ++g_check.mismatches;
+          char text[160];
+          std::snprintf(text, sizeof text, "flag %08x/%016llx: cache %s %u, plain %s %u", key.hash,
+                        static_cast<unsigned long long>(key.key), *cached ? "has" : "none",
+                        *cached ? (*cached)->value : 0u, plain ? "has" : "none", plain ? plain->value : 0u);
+          g_check.last = text;
+        }
+      }
+      return *cached;
+    }
+  }
+  return plain_read(key);
+}
+
+std::optional<protocol::FlagEntry> GameFlagStore::plain_read(FlagKey key) {
   GameFlags flags(memory_);
   protocol::FlagEntry e{key, protocol::FlagKind::boolean, 0};
   if (key.kind == FlagKeyKind::key64) {
@@ -417,6 +725,7 @@ bool GameFlagStore::write(const protocol::FlagEntry& entry) {
       now && now->kind == entry.kind && now->value == entry.value) {
     return true;
   }
+  frame_.reset();  // a write of ours changes the queues the read cache's view holds
   if (key.kind == FlagKeyKind::key64) {
     if (key.table != 0 || entry.kind != protocol::FlagKind::boolean || entry.value > 1) {
       return false;

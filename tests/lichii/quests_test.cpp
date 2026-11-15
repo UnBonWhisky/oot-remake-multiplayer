@@ -1,6 +1,7 @@
 // Tests for the shared Threads of Time quests (lichii/hook/coop_quests.cpp, issue 193).
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -95,7 +96,11 @@ TEST_CASE("quests: the table is sorted by hash, once, each from NotReady to Comp
         std::set<std::uint32_t> seen;
         for (const char* s : q.steps) CHECK_MESSAGE(seen.insert(host::flag_hash(s)).second, q.name);
     }
+#if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
+    CHECK(CoopQuests::Quests().size() == 16);  // and the four shared by their end
+#else
     CHECK(CoopQuests::Quests().size() == 12);
+#endif
     CHECK(CoopQuests::Find(0x12345678u) == nullptr);
 }
 
@@ -416,3 +421,36 @@ TEST_CASE("quests: Get_Epona shares its end only") {
     CHECK(odd.store.write_exact(entry("Complete")));
     CHECK(odd.enums[kEpona] == 0xdeadbeefu);
 }
+
+TEST_CASE("quests: Epona's owned horse is written for an adult whose Get_Epona came Complete") {
+    using CoopQuests::OwnedHorseMend;
+    const std::uint32_t complete = coop::host::flag_hash("Complete");
+    const std::uint32_t racing = coop::host::flag_hash("GambleRacePlaying");
+    const std::optional<std::string> none = std::string();
+    const auto mended = OwnedHorseMend(complete, false, none);
+    REQUIRE(mended);
+    CHECK(std::string(*mended) == "Animal_Epona_Adult");
+    CHECK_FALSE(OwnedHorseMend(racing, false, none));                  // not won anywhere yet
+    CHECK_FALSE(OwnedHorseMend(complete, true, none));                 // a child owns no horse
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::string("Animal_Epona_Adult")));  // owned
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::string("Animal_Horse_A")));      // another horse kept
+    CHECK_FALSE(OwnedHorseMend(std::nullopt, false, none));            // unread
+    CHECK_FALSE(OwnedHorseMend(complete, std::nullopt, none));
+    CHECK_FALSE(OwnedHorseMend(complete, false, std::nullopt));
+    CHECK(coop::host::flag_hash("Sequence_IsChildhood") == CoopQuests::epona::kChildhood);
+    CHECK(coop::host::flag_hash("OwnedHorseList.ActorName") == CoopQuests::epona::kOwnedActor);
+}
+
+#if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
+TEST_CASE("quests shared by their end: the Stone of Fire and the Sages of Shadow, Spirit and Water") {
+    const auto t = CoopQuests::Quests();
+    CHECK(std::is_sorted(t.begin(), t.end(), [](const auto& a, const auto& b) { return a.hash < b.hash; }));
+    for (const std::uint32_t h : {0x1002b466u, 0x19189e9du, 0x560a64afu, 0x7a91dbd5u}) {
+        const auto* q = CoopQuests::Find(h);
+        REQUIRE(q != nullptr);
+        CHECK(q->complete_only);
+        CHECK(std::string(q->steps.back()) == "Complete");
+        CHECK(std::string(q->steps.front()) == "NotReady");
+    }
+}
+#endif

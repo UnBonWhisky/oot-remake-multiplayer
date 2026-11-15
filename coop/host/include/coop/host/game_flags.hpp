@@ -9,6 +9,7 @@
 // (saved copy, save-file mask). Reads see a queued write that is not applied
 // yet, as the game's 0x20fd90 does.
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -63,6 +64,9 @@ class GameFlags {
   // game's queue is not seen until the game applies it. Nothing when the
   // text is not 0-terminated within its buffer or not printable ASCII.
   std::optional<std::string> get_string64(std::uint32_t hash);
+  // Element `index` of a String64Array flag (type 17; for example
+  // OwnedHorseList.ActorName). Same rules as get_string64.
+  std::optional<std::string> get_string64_array(std::uint32_t hash, std::uint32_t index);
 
   // Queues a write as the game's setter does. False when the flag is
   // unknown, the queue is full, the game applied the queue while this was
@@ -79,6 +83,12 @@ class GameFlags {
   // not fit (at most 63 bytes, printable ASCII).
   static bool set_string64_now(WritableGameMemory& memory, std::uint32_t hash,
                                std::string_view text);
+
+  // Writes element `index` of a String64Array flag straight into its buffer,
+  // like set_string64_now (the game has no queue for it; the owned horse,
+  // docs/flags.md "Epona"). False when unknown or the text does not fit.
+  static bool set_string64_array_now(WritableGameMemory& memory, std::uint32_t hash,
+                                     std::uint32_t index, std::string_view text);
 
   // Which typed table (the save type ids, 0 to 25) holds `hash`, for finding
   // a flag's type. Nothing when none does.
@@ -111,6 +121,30 @@ class GameFlagStore final : public FlagStore {
 
  private:
   WritableGameMemory& memory_;
+  // The read cache (set_flag_read_cache, off unless a build turns it on: the NX2navi port): what the reads of
+  // one store share. A store lives one frame, so this does too: the manager, each table's header and its
+  // write queue are read once, then each flag costs one read of its value instead of a dozen. Any write of
+  // ours drops it.
+  struct Frame;
+  std::shared_ptr<Frame> frame_;
+  std::optional<std::optional<protocol::FlagEntry>> cached_read(FlagKey key);
+  std::optional<protocol::FlagEntry> plain_read(FlagKey key);
 };
+
+// The read cache, for every GameFlagStore from now on (off by default; the NX2navi port turns it on). With it, a
+// flag's place in the game's tables (an index, never a pointer) is kept from frame to
+// frame on the reading thread, checked against the tables' pointers and sizes at every frame's first read.
+// drop_flag_read_cache drops it all (a load, a scene change); the next read finds each place again.
+void set_flag_read_cache(bool on);
+void drop_flag_read_cache();
+// A debug check of the cache (off by default): with it, every read the cache answers is also read the plain way
+// and the two compared. The counts are kept for flag_read_cache_check().
+void set_flag_read_cache_check(bool on);
+struct FlagReadCacheCheck {
+  std::uint64_t compared = 0;    // reads the cache answered, read again the plain way
+  std::uint64_t mismatches = 0;  // of them, answers that differed
+  std::string last;              // the last mismatch, as text
+};
+FlagReadCacheCheck flag_read_cache_check();
 
 }  // namespace coop::host

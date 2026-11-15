@@ -22,6 +22,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace CoopSharedScenes {
@@ -48,8 +49,30 @@ inline constexpr float kRoomM = 30.0f;
 inline constexpr float kNoRoomM = 8.0f;
 // How long a start waits while our game cannot take it (our own event, a
 // menu, a pause, a load) before it is skipped: a cutscene joined later than
-// this would be far behind the starter's.
+// this would be far behind the starter's. A build may set it
+// (LICHII_COOP_SHARED_SCENE_JOIN_US; the NX2navi build waits longer, so a
+// player who was in a talk, a menu or the item-get scene when another player's
+// story cutscene began still gets it, as the item-get scene waits its turn).
+#ifdef LICHII_COOP_SHARED_SCENE_JOIN_US
+inline constexpr std::uint64_t kJoinUs = LICHII_COOP_SHARED_SCENE_JOIN_US;
+#else
 inline constexpr std::uint64_t kJoinUs = 3'000'000;
+#endif
+
+// "Everyone plays it, wherever they are" (a user's rule for the NX2navi port, 2026-11-14): a start from another
+// scene, from too far, or from another dungeon room is not skipped; our game is first brought to the starter
+// (Bring: the build's trip to another player, which arrives where the starter stands, after their scene when it
+// has moved them) and then plays it there. A busy game (a talk, a menu, a load, a boss fight) waits for up to
+// kEveryoneUs. Off unless a build sets LICHII_COOP_SHARED_SCENES_EVERYONE=1 (the emulator and Hookshot builds are
+// unchanged: same scene and near only).
+#ifdef LICHII_COOP_SHARED_SCENES_EVERYONE
+inline constexpr bool kEveryoneDefault = LICHII_COOP_SHARED_SCENES_EVERYONE != 0;
+#else
+inline constexpr bool kEveryoneDefault = false;
+#endif
+inline constexpr std::uint64_t kEveryoneUs = 180'000'000;
+// A trip asked for and not made (the starter's game refused it while in its scene): asked again after this.
+inline constexpr std::uint64_t kBringAgainUs = 15'000'000;
 
 using Vec3 = std::array<float, 3>;
 
@@ -60,6 +83,7 @@ struct Here {
     std::optional<Vec3> link;   // our Link's place
     bool dungeon = false;       // the scene is a dungeon (rooms loaded one by one)
     std::optional<int> room;    // our Link's room there, if known
+    bool boss_fight = false;    // a boss fight here: everyone mode waits until it ends
     std::uint64_t now_us = 0;
 };
 
@@ -81,8 +105,30 @@ public:
     std::optional<std::string> Next(const Here& here, Played&& played) {
         Visit(here.scene);
         while (!pending_.empty()) {
-            const std::string why = Why(pending_.front(), here, played(pending_.front().name));
+            // `played` may also take when the start came (at_us), to tell a scene this save
+            // had played before from one whose flag just came with the start (a build's choice).
+            bool was_played = false;
+            if constexpr (std::is_invocable_v<Played&, const std::string&, std::uint64_t>) {
+                was_played = played(pending_.front().name, pending_.front().at_us);
+            } else {
+                was_played = played(pending_.front().name);
+            }
+            const std::string why = Why(pending_.front(), here, was_played);
             if (why == "wait") {
+                return std::nullopt;
+            }
+            if (why == "bring") {
+                Pending& p = pending_.front();
+                if (!p.bring_asked || here.now_us >= p.bring_at_us + kBringAgainUs) {
+                    if (!p.bring_asked) {
+                        notes_.push_back("player " + std::to_string(p.player) + " started the story cutscene " +
+                                         p.name + " in " + p.scene + ": going to them to play it with them");
+                    }
+                    p.bring_asked = true;
+                    p.bring_at_us = here.now_us;
+                    p.bring_from = here.scene;
+                    bring_ = p.player;
+                }
                 return std::nullopt;
             }
             Pending taken = std::move(pending_.front());
@@ -102,6 +148,24 @@ public:
     // Log lines since the last call.
     std::vector<std::string> TakeNotes();
     std::size_t Waiting() const { return pending_.size(); }
+    // Everyone mode: the player our game should go to now (once per ask), if any.
+    std::optional<std::uint8_t> TakeBring() {
+        auto b = bring_;
+        bring_.reset();
+        return b;
+    }
+    void SetEveryone(bool on) { everyone_ = on; }
+    // Where a starter is now (each frame, for the players in our scene): a start that waits for our trip is
+    // joined once we stand near them.
+    void UpdateStarter(std::uint8_t player, const std::string& scene, const Vec3& at, std::optional<int> room) {
+        for (Pending& p : pending_) {
+            if (p.player == player && p.scene == scene) {
+                p.starter = at;
+                p.room = room;
+            }
+        }
+    }
+    bool Everyone() const { return everyone_; }
 
 private:
     struct Pending {
@@ -111,15 +175,21 @@ private:
         std::optional<Vec3> starter;
         std::uint64_t at_us;
         std::optional<int> room;
+        bool bring_asked = false;
+        std::uint64_t bring_at_us = 0;
+        std::string bring_from;  // our scene when the trip was asked
     };
     // "" to start now, "wait", or why it is skipped.
     std::string Why(const Pending& p, const Here& here, bool played) const;
+    std::string WhyEveryone(const Pending& p, const Here& here, bool played) const;
     void Visit(const std::string& scene);
     std::string scene_;
     std::vector<Pending> pending_;
     std::set<std::string> done_;    // asked, sent or played here this visit
     std::set<std::string> joined_;  // asked because another player started it
     std::vector<std::string> notes_;
+    bool everyone_ = kEveryoneDefault;
+    std::optional<std::uint8_t> bring_;
 };
 
 // LICHII_COOP_SHARED_CUTSCENES: unset or anything but "0": on; "0": off.

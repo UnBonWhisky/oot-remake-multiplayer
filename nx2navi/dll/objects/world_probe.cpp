@@ -270,6 +270,25 @@ void Step(GuestPort& port, std::uint64_t main, std::uint64_t now_ms,
                       static_cast<double>(rows[2]), static_cast<double>(rows[8]),
                       static_cast<double>(distance), life_now, anim.c_str());
         log(line);
+        // OOT_COOP_DEBUG_ACTORS_DUMP=<bytes>: the actor's first bytes as words, every 2 s, so an
+        // owner's actor and another game's copy of it can be compared word by word.
+        static const std::size_t dump = [] {
+            const char* d = std::getenv("OOT_COOP_DEBUG_ACTORS_DUMP");
+            const long n = d != nullptr ? std::atol(d) : 0;
+            return n > 0 ? std::min<std::size_t>(static_cast<std::size_t>(n), 0x1000) & ~std::size_t{3} : 0;
+        }();
+        if (dump > 0 && (now_ms / 1000) % 2 == 0) {
+            std::vector<std::uint32_t> words(dump / 4);
+            if (port.Read(f.actor, words.data(), dump)) {
+                std::string text = "objects: dump " + f.name + ":";
+                char w[12];
+                for (const std::uint32_t v : words) {
+                    std::snprintf(w, sizeof(w), " %08x", v);
+                    text += w;
+                }
+                log(text);
+            }
+        }
     }
 }
 

@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <tuple>
+#include <type_traits>
 
 #include "coop/net/client.hpp"
 #include "coop/protocol/messages.hpp"
@@ -154,6 +156,320 @@ void Track::Push(Pose pose, std::uint64_t now_ms) {
     newest_ms_ = now_ms;
 }
 
+std::size_t SendBones() {
+    static const std::size_t n = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_SEND_BONES");
+        const long v = e != nullptr ? std::atol(e) : 0;
+        return v > 0 ? std::min<std::size_t>(static_cast<std::size_t>(v), kMaxBones) : kMaxSendBones;
+    }();
+    return n;
+}
+
+std::uint64_t PlayoutMs() {
+    static const std::uint64_t ms = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_PLAYOUT");
+        return e != nullptr && e[0] == '0' && e[1] == 0 ? std::uint64_t{0} : kPlayoutMs;
+    }();
+    return ms;
+}
+
+Pose Blend(const Pose& a, const Pose& b, float t) {
+    Pose out;
+    out.skeleton = b.skeleton;
+    out.bones.reserve(std::max(a.bones.size(), b.bones.size()));
+    std::size_t i = 0, j = 0;
+    while (i < a.bones.size() || j < b.bones.size()) {
+        if (j == b.bones.size() || (i < a.bones.size() && a.bones[i].bone < b.bones[j].bone)) {
+            out.bones.push_back(a.bones[i++]);
+        } else if (i == a.bones.size() || b.bones[j].bone < a.bones[i].bone) {
+            out.bones.push_back(b.bones[j++]);
+        } else {
+            const BonePose& o = a.bones[i++];
+            BonePose n = b.bones[j++];
+            if (n.rotation && o.rotation) n.rotation = Nlerp(*o.rotation, *n.rotation, t);
+            if (n.translation && o.translation) n.translation = Lerp(*o.translation, *n.translation, t);
+            if (n.scale && o.scale) n.scale = Lerp(*o.scale, *n.scale, t);
+            if (t < 0.5f) n.flags = o.flags;
+            out.bones.push_back(std::move(n));
+        }
+    }
+    return out;
+}
+
+std::uint64_t FrameClock::Tick(std::uint64_t now_ms) {
+    const double now = static_cast<double>(now_ms);
+    if (!on_ || now_ms < last_ || now_ms - last_ > 250 || std::fabs(smooth_ - now) > 100.0) {
+        on_ = true;
+        last_ = now_ms;
+        smooth_ = now;
+        return now_ms;
+    }
+    const double dt = std::clamp(static_cast<double>(now_ms - last_), 5.0, 100.0);
+    last_ = now_ms;
+    period_ += (dt - period_) * 0.05;
+    smooth_ += period_;
+    smooth_ += (now - smooth_) * 0.05;
+    return static_cast<std::uint64_t>(std::llround(smooth_));
+}
+
+bool FrameClockOn() {
+    static const bool on = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_FRAME_CLOCK");
+        return !(e != nullptr && e[0] == '0' && e[1] == 0);
+    }();
+    return on;
+}
+
+bool BoneKeys() {
+    static const bool on = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_BONE_KEYS");
+        return !(e != nullptr && e[0] == '0' && e[1] == 0);
+    }();
+    return on;
+}
+
+void Track::PushSent(Pose pose, std::uint64_t sent_ms, std::uint64_t now_ms,
+                     const std::vector<std::uint16_t>* carried) {
+    lags_.push_back(static_cast<std::int64_t>(now_ms) - static_cast<std::int64_t>(sent_ms));
+    if (lags_.size() > kPlayoutLags) lags_.erase(lags_.begin());
+    // Bone keys: the bones the message carried, each in its own list.
+    auto key = [&](const BonePose& value) {
+        if (value.bone >= kMaxBones) return;
+        if (keys_.size() <= value.bone) keys_.resize(value.bone + 1u);
+        auto& list = keys_[value.bone];
+        auto at = std::find_if(list.begin(), list.end(), [&](const Key& k) { return k.sent_ms >= sent_ms; });
+        if (at != list.end() && at->sent_ms == sent_ms) {
+            at->value = value;
+        } else {
+            list.insert(at, Key{sent_ms, value});
+        }
+        if (list.size() > kKeysKept) list.erase(list.begin());
+    };
+    // The shown time now (as PlayAt works it out): a carried value that changes a bone's course there is eased.
+    const std::int64_t shown = static_cast<std::int64_t>(now_ms) - *std::min_element(lags_.begin(), lags_.end()) -
+                               static_cast<std::int64_t>(delay_ms_);
+    for (const BonePose& b : pose.bones) {
+        if (carried != nullptr && !std::binary_search(carried->begin(), carried->end(), b.bone)) continue;
+        BonePose before = b;
+        const bool had = carried != nullptr && BoneKeys() && KeyValue(before, shown);
+        if (had) AddEase(before, shown);
+        key(b);
+        if (!had) continue;
+        BonePose after = b;
+        if (!KeyValue(after, shown)) continue;
+        if (ease_.size() <= b.bone) ease_.resize(b.bone + 1u);
+        Ease& e = ease_[b.bone];
+        e = Ease{};
+        e.from = shown;
+        if (before.rotation && after.rotation) {
+            Quat x = *before.rotation;
+            const Quat& y = *after.rotation;
+            if (x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3] < 0.0f) {
+                for (float& v : x) v = -v;
+            }
+            for (std::size_t k = 0; k < 4; ++k) e.rotation[k] = x[k] - y[k];
+        }
+        if (before.translation && after.translation) {
+            for (std::size_t k = 0; k < 3; ++k) e.translation[k] = (*before.translation)[k] - (*after.translation)[k];
+        }
+        if (before.scale && after.scale) {
+            for (std::size_t k = 0; k < 3; ++k) e.scale[k] = (*before.scale)[k] - (*after.scale)[k];
+        }
+        e.on = true;
+    }
+    Stamped stamped{pose, sent_ms};
+    // In sent order; one sent at the same time as a kept one replaces it.
+    auto at = std::find_if(kept_.begin(), kept_.end(), [&](const Stamped& k) { return k.sent_ms >= sent_ms; });
+    if (at != kept_.end() && at->sent_ms == sent_ms) {
+        *at = std::move(stamped);
+    } else {
+        kept_.insert(at, std::move(stamped));
+    }
+    while (kept_.size() > kPlayoutKeep) kept_.erase(kept_.begin());
+    if (!kept_.empty() && kept_.back().sent_ms == sent_ms) {
+        newest_ = std::move(pose);  // Fill and Drives see the newest, as with Push
+        newest_ms_ = now_ms;
+    }
+}
+
+std::optional<Pose> Track::PlayAt(std::uint64_t now_ms, std::uint64_t delay_ms) const {
+    delay_ms_ = delay_ms;
+    if (kept_.empty()) return newest_;
+    // The sender's clock now, as the quickest arrival lately says (the least lag is the clocks' offset).
+    const std::int64_t offset = *std::min_element(lags_.begin(), lags_.end());
+    const std::int64_t target =
+        static_cast<std::int64_t>(now_ms) - offset - static_cast<std::int64_t>(delay_ms);
+    if (target <= static_cast<std::int64_t>(kept_.front().sent_ms)) return kept_.front().pose;
+    for (std::size_t i = 1; i < kept_.size(); ++i) {
+        const auto b = static_cast<std::int64_t>(kept_[i].sent_ms);
+        if (target < b) {
+            const auto a = static_cast<std::int64_t>(kept_[i - 1].sent_ms);
+            const float t = b > a ? static_cast<float>(target - a) / static_cast<float>(b - a) : 1.0f;
+            Pose out = Blend(kept_[i - 1].pose, kept_[i].pose, t);
+            if (BoneKeys()) KeyBones(out, target);
+            return out;
+        }
+    }
+    return kept_.back().pose;  // behind: the newest held, never guessed ahead
+}
+
+namespace {
+
+Vec3 Ahead(const Vec3& before, const Vec3& last, float s) {
+    return {last[0] + (last[0] - before[0]) * s, last[1] + (last[1] - before[1]) * s,
+            last[2] + (last[2] - before[2]) * s};
+}
+
+Quat Ahead(Quat before, const Quat& last, float s) {
+    const float dot = before[0] * last[0] + before[1] * last[1] + before[2] * last[2] + before[3] * last[3];
+    if (dot < 0.0f) {
+        for (float& v : before) v = -v;
+    }
+    Quat q{};
+    for (std::size_t k = 0; k < 4; ++k) q[k] = last[k] + (last[k] - before[k]) * s;
+    return Normalised(q);
+}
+
+}  // namespace
+
+namespace {
+// How far two carried values of a bone are apart, in packed units (as BonePicker::Change).
+float KeyUnits(const BonePose& x, const BonePose& y) {
+    float most = 0.0f;
+    if (x.rotation && y.rotation) {
+        const Quat& a = *x.rotation;
+        const Quat& b = *y.rotation;
+        const float sign = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3] < 0.0f ? -1.0f : 1.0f;
+        for (std::size_t k = 0; k < 4; ++k) most = std::max(most, std::fabs(a[k] - sign * b[k]) * 32767.0f);
+    }
+    auto unit = [&](const std::optional<Vec3>& a, const std::optional<Vec3>& b) {
+        if (!a || !b) return;
+        for (std::size_t k = 0; k < 3; ++k) most = std::max(most, std::fabs((*a)[k] - (*b)[k]) * proto::kPoseUnit);
+    };
+    unit(x.translation, y.translation);
+    unit(x.scale, y.scale);
+    return most;
+}
+}  // namespace
+
+bool Track::KeyValue(BonePose& out, std::int64_t target) const {
+    if (out.bone >= keys_.size()) return false;
+    const auto& list = keys_[out.bone];
+    // b: the oldest carried after target; a: the one before it (at or before target); p: the one before a.
+    std::size_t b = 0;
+    while (b < list.size() && static_cast<std::int64_t>(list[b].sent_ms) <= target) ++b;
+    if (b == 0) return false;  // nothing carried at or before target: the blend
+    const Key& a = list[b - 1];
+    const BonePose* va = &a.value;
+    const BonePose* vp = b >= 2 ? &list[b - 2].value : nullptr;
+    if (vp != nullptr && KeyUnits(*vp, *va) > static_cast<float>(kKeySlowUnits)) return false;  // fast: the blend
+    if (b < list.size()) {
+        const Key& k = list[b];
+        const BonePose* vb = &k.value;
+        const auto ta = static_cast<std::int64_t>(a.sent_ms);
+        const auto tb = static_cast<std::int64_t>(k.sent_ms);
+        const float t = tb > ta ? static_cast<float>(target - ta) / static_cast<float>(tb - ta) : 1.0f;
+        if (out.rotation && va->rotation && vb->rotation) out.rotation = Nlerp(*va->rotation, *vb->rotation, t);
+        if (out.translation && va->translation && vb->translation) {
+            out.translation = Lerp(*va->translation, *vb->translation, t);
+        }
+        if (out.scale && va->scale && vb->scale) out.scale = Lerp(*va->scale, *vb->scale, t);
+        return true;
+    }
+    // Not carried again yet: on at its last speed (the sender sends it once this guess is kBoneStep off).
+    const float s = vp != nullptr ? KeyAhead(list[b - 2].sent_ms, a.sent_ms, static_cast<std::uint64_t>(target))
+                                  : 0.0f;
+    if (out.rotation && va->rotation) {
+        out.rotation = s > 0.0f && vp->rotation ? Ahead(*vp->rotation, *va->rotation, s) : *va->rotation;
+    }
+    if (out.translation && va->translation) {
+        out.translation = s > 0.0f && vp->translation ? Ahead(*vp->translation, *va->translation, s) : *va->translation;
+    }
+    if (out.scale && va->scale) {
+        out.scale = s > 0.0f && vp->scale ? Ahead(*vp->scale, *va->scale, s) : *va->scale;
+    }
+    return true;
+}
+
+void Track::AddEase(BonePose& out, std::int64_t target) const {
+    if (out.bone >= ease_.size() || !ease_[out.bone].on) return;
+    const Ease& e = ease_[out.bone];
+    const std::int64_t since = target - e.from;
+    if (since >= kKeyEaseMs) return;
+    const float w = since <= 0 ? 1.0f : 1.0f - static_cast<float>(since) / static_cast<float>(kKeyEaseMs);
+    if (out.rotation) {
+        Quat q = *out.rotation;
+        for (std::size_t k = 0; k < 4; ++k) q[k] += e.rotation[k] * w;
+        out.rotation = Normalised(q);
+    }
+    if (out.translation) {
+        for (std::size_t k = 0; k < 3; ++k) (*out.translation)[k] += e.translation[k] * w;
+    }
+    if (out.scale) {
+        for (std::size_t k = 0; k < 3; ++k) (*out.scale)[k] += e.scale[k] * w;
+    }
+}
+
+void Track::KeyBones(Pose& base, std::int64_t target) const {
+    for (BonePose& out : base.bones) {
+        if (KeyValue(out, target)) AddEase(out, target);
+    }
+}
+
+double Turned(const Pose& before, const Pose& now) {
+    double sum = 0.0;
+    std::size_t i = 0, j = 0;
+    while (i < before.bones.size() && j < now.bones.size()) {
+        const BonePose& a = before.bones[i];
+        const BonePose& b = now.bones[j];
+        if (a.bone < b.bone) {
+            ++i;
+        } else if (b.bone < a.bone) {
+            ++j;
+        } else {
+            if (a.rotation && b.rotation) {
+                // The angle of the relative rotation conj(a) * b, from its vector part and its w by atan2, in
+                // double. acos of the dot product cannot tell a standing bone's 0.014 degrees a frame (1 - cos is
+                // then 1e-8, under a float's precision) from the noise of two normalisations: it read float noise
+                // of up to 0.05 degrees a bone as motion.
+                const double ax = (*a.rotation)[0], ay = (*a.rotation)[1], az = (*a.rotation)[2], aw = (*a.rotation)[3];
+                const double bx = (*b.rotation)[0], by = (*b.rotation)[1], bz = (*b.rotation)[2], bw = (*b.rotation)[3];
+                const double w = aw * bw + ax * bx + ay * by + az * bz;
+                const double x = aw * bx - bw * ax - (ay * bz - az * by);
+                const double y = aw * by - bw * ay - (az * bx - ax * bz);
+                const double z = aw * bz - bw * az - (ax * by - ay * bx);
+                sum += 2.0 * std::atan2(std::sqrt(x * x + y * y + z * z), std::fabs(w)) * 57.29577951308232;
+            }
+            ++i;
+            ++j;
+        }
+    }
+    return sum;
+}
+
+void Motion::Add(const Pose& pose) {
+    if (last && last->skeleton == pose.skeleton) {
+        const double v = Turned(*last, pose);
+        v_sum += v;
+        if (last_v >= 0.0) jerk_sum += std::fabs(v - last_v);
+        if (v < 0.05) ++still;  // under float noise of one quaternion read twice
+        ++frames;
+        last_v = v;
+    } else {
+        last_v = -1.0;
+    }
+    last = pose;
+}
+
+std::string Motion::Take() {
+    char text[96];
+    std::snprintf(text, sizeof(text), "v %.2f jerk %.2f still %u/%u",
+                  frames ? v_sum / frames : 0.0, frames > 1 ? jerk_sum / (frames - 1) : 0.0, still, frames);
+    v_sum = jerk_sum = 0.0;
+    frames = still = 0;
+    return text;
+}
+
 Pose Track::Fill(Pose pose) const {
     if (!newest_ || newest_->skeleton != pose.skeleton) return pose;
     std::vector<BonePose> merged;
@@ -192,9 +508,39 @@ int BonePicker::Change(const proto::PoseBone& then, const proto::PoseBone& now) 
     return most;
 }
 
+namespace {
+
+// The receiver's guess for a bone (KeyAhead), in packed units.
+proto::PoseBone Guess(const proto::PoseBone& before, std::uint64_t tp, const proto::PoseBone& last,
+                      std::uint64_t ta, std::uint64_t t) {
+    const float s = KeyAhead(tp, ta, t);
+    if (s <= 0.0f) return last;
+    proto::PoseBone out = last;
+    auto part = [&](auto& o, const auto& b) {
+        if (!o || !b) return;
+        int sign = 1;
+        if constexpr (std::tuple_size_v<std::remove_cvref_t<decltype(*o)>> == 4) {
+            long dot = 0;
+            for (std::size_t k = 0; k < 4; ++k) dot += long{(*o)[k]} * (*b)[k];
+            if (dot < 0) sign = -1;  // the same rotation, the other sign: as Nlerp takes the short way
+        }
+        for (std::size_t k = 0; k < o->size(); ++k) {
+            const float v = (*o)[k] + ((*o)[k] - sign * (*b)[k]) * s;
+            (*o)[k] = static_cast<std::int16_t>(std::lround(std::clamp(v, -32767.0f, 32767.0f)));
+        }
+    };
+    part(out.rotation, before.rotation);
+    part(out.translation, before.translation);
+    part(out.scale, before.scale);
+    return out;
+}
+
+}  // namespace
+
 std::vector<proto::PoseBone> BonePicker::Pick(std::uint32_t skeleton,
                                               const std::vector<proto::PoseBone>& full,
-                                              std::uint64_t now_ms, std::size_t budget) {
+                                              std::uint64_t now_ms, std::size_t budget,
+                                              std::uint64_t key_ms) {
     if (skeleton != skeleton_) {
         skeleton_ = skeleton;
         sent_.clear();
@@ -216,7 +562,10 @@ std::vector<proto::PoseBone> BonePicker::Pick(std::uint32_t skeleton,
             continue;
         }
         const std::uint64_t age = now_ms - std::min(now_ms, it->second.ms);
-        const int change = Change(it->second.bone, full[i]);
+        const Sent& was = it->second;
+        const bool slow = key_ms != 0 && was.before && Change(*was.before, was.bone) <= kKeySlowUnits;
+        const int change = slow ? Change(Guess(*was.before, was.before_key_ms, was.bone, was.key_ms, key_ms), full[i])
+                                : Change(was.bone, full[i]);
         const std::int64_t priority = change + static_cast<std::int64_t>(age);
         if (age >= kBoneRefreshMs) {
             aged.push_back({static_cast<std::int64_t>(age), i});
@@ -253,7 +602,16 @@ std::vector<proto::PoseBone> BonePicker::Pick(std::uint32_t skeleton,
     out.reserve(wanted.size());
     for (const Wanted& w : wanted) {
         out.push_back(full[w.index]);
-        sent_[full[w.index].bone] = {full[w.index], now_ms};
+        Sent& was = sent_[full[w.index].bone];
+        if (key_ms != 0 && was.ms != 0) {
+            was.before = was.bone;
+            was.before_key_ms = was.key_ms;
+        } else {
+            was.before.reset();
+        }
+        was.bone = full[w.index];
+        was.ms = now_ms;
+        was.key_ms = key_ms;
     }
     // Bones that stopped moving on our side are no longer in `full`: forget them.
     std::erase_if(sent_, [&](const auto& kv) {
@@ -443,6 +801,11 @@ struct State {
     // band and seed, the bow's string.
     std::vector<Pose> pieces_outbox;
     std::uint32_t outbox_serial = 0;
+    std::uint64_t outbox_ms = 0;  // when the outbox was read (playout: its stamp)
+    FrameClock frame_clock;       // playout: the even frame clock
+    // LICHII_COOP_DEBUG_POSE: smoothness of our own Link's pose and of each puppet's written pose.
+    Motion ours_motion;
+    std::array<Motion, std::size_t{proto::kMaxPlayers} + 1> puppet_motion;
     std::uint32_t sent_serial = 0;
     std::uint64_t last_send_ms = 0;
     std::uint32_t sequence = 0;
@@ -655,7 +1018,7 @@ namespace {
 // no pose of its skeleton has come.
 enum class Wrote { none, written, refused };
 Wrote WriteFor(State& s, CoopPuppet::Guest& guest, std::uint8_t number, std::uint64_t actor,
-               std::uint64_t now_ms) {
+               std::uint64_t now_ms, Motion* motion = nullptr) {
     const auto skel = FindSkeleton(guest, actor);
     if (!skel) return Wrote::none;
     const std::uint32_t id = SkeletonId(skel->count, skel->model);
@@ -671,9 +1034,12 @@ Wrote WriteFor(State& s, CoopPuppet::Guest& guest, std::uint8_t number, std::uin
         }
     } else {
         const auto& tracks = s.tracks[number];
-        if (const auto it = tracks.find(id); it != tracks.end()) pose = it->second.At(now_ms);
+        if (const auto it = tracks.find(id); it != tracks.end()) {
+            pose = PlayoutMs() != 0 ? it->second.PlayAt(now_ms, PlayoutMs()) : it->second.At(now_ms);
+        }
     }
     if (!pose) return Wrote::none;
+    if (motion != nullptr && s.debug) motion->Add(*pose);
     return WritePose(s, guest, actor, *pose) ? Wrote::written : Wrote::refused;
 }
 
@@ -690,6 +1056,8 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
                  std::uint64_t now_ms) {
     State& s = S();
     std::lock_guard lock(s.mutex);
+    // Playout: our stamps and the shown time step evenly with the game's frames (FrameClock).
+    const std::uint64_t frame_ms = PlayoutMs() != 0 && FrameClockOn() ? s.frame_clock.Tick(now_ms) : now_ms;
     const std::uint64_t player = main_base != 0 ? FindPlayer(guest, main_base) : 0;
     if (player != 0 && !g_frozen.load(std::memory_order_relaxed)) {
         if (auto local = ReadLocal(s, guest, player)) {
@@ -704,11 +1072,14 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
                 }
             }
             ++s.outbox_serial;
+            s.outbox_ms = frame_ms;
+            if (s.debug) s.ours_motion.Add(*s.outbox);
         }
     }
     for (const auto& [number, actor] : puppets) {
         if (actor == 0 || number >= s.tracks.size()) continue;
-        const Wrote body = WriteFor(s, guest, number, actor, now_ms);
+        const Wrote body = WriteFor(s, guest, number, actor, frame_ms,
+                                    number < s.puppet_motion.size() ? &s.puppet_motion[number] : nullptr);
         if (body == Wrote::written) {
             ++s.written;
         } else if (body == Wrote::refused ||
@@ -716,7 +1087,7 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
             ++s.refused;  // poses come, none of this puppet's skeleton (age)
         }
         for (const std::uint64_t piece : HeldPieces(guest, actor)) {
-            const Wrote w = WriteFor(s, guest, number, piece, now_ms);
+            const Wrote w = WriteFor(s, guest, number, piece, frame_ms);
             if (w == Wrote::written) {
                 ++s.pieces_written;
             }
@@ -733,6 +1104,13 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
         std::string facing = "; yaw ours " + YawText(guest, player);
         for (const auto& [number, actor] : puppets) {
             facing += ", P" + std::to_string(number) + " " + YawText(guest, actor);
+        }
+        // Smoothness (degrees of bone turn a game frame): ours as read, each puppet as written.
+        facing += "; motion ours " + s.ours_motion.Take();
+        for (const auto& [number, actor] : puppets) {
+            if (number < s.puppet_motion.size()) {
+                facing += ", P" + std::to_string(number) + " " + s.puppet_motion[number].Take();
+            }
         }
         Say(s, (s.local_model.empty() ? std::string("?") : s.local_model) + " " +
                    std::to_string(s.first.size()) + " bones, " + std::to_string(s.last_size) +
@@ -773,17 +1151,22 @@ std::vector<proto::PlayerPose> TakeOutgoing(std::uint64_t server_now_us, std::ui
     State& s = S();
     std::lock_guard lock(s.mutex);
     if (!s.outbox || s.outbox_serial == s.sent_serial ||
-        now_ms - s.last_send_ms < 1000 / kSendHz) {
+        now_ms - s.last_send_ms + (PlayoutMs() != 0 ? kSendEarlyMs : 0) < 1000 / kSendHz) {
         return out;
     }
     s.sent_serial = s.outbox_serial;
     s.last_send_ms = now_ms;
     proto::PlayerPose body;
-    body.time = {server_now_us, ++s.sequence};
+    // Playout: stamped with when the bones were read, not when they go.
+    const std::uint64_t read_us =
+        PlayoutMs() != 0 ? server_now_us - std::min<std::uint64_t>(server_now_us, (now_ms - std::min(now_ms, s.outbox_ms)) * 1000)
+                        : server_now_us;
+    body.time = {read_us, ++s.sequence};
     body.skeleton = s.outbox->skeleton;
     // Sent even with no bone changed: the receiver keeps its puppet's pose
     // fresh (Drives) and its blend interval right.
-    body.bones = s.picker.Pick(body.skeleton, Encode(*s.outbox), now_ms);
+    body.bones = s.picker.Pick(body.skeleton, Encode(*s.outbox), now_ms, SendBones(),
+                               PlayoutMs() != 0 && BoneKeys() ? std::max<std::uint64_t>(read_us / 1000, 1) : 0);
     out.push_back(std::move(body));
     ++s.sent;
     // Each piece in our hands as a pose of its own skeleton: when it changed,
@@ -838,7 +1221,14 @@ void Receive(const proto::PlayerPose& m, std::uint64_t now_ms) {
     if (m.player_number == 0 || m.player_number >= s.tracks.size()) return;
     auto& tracks = s.tracks[m.player_number];
     auto& track = tracks[m.skeleton];
-    track.Push(track.Fill(std::move(pose)), now_ms);
+    if (PlayoutMs() != 0 && m.time.server_time_us != 0) {
+        std::vector<std::uint16_t> carried;
+        carried.reserve(pose.bones.size());
+        for (const BonePose& b : pose.bones) carried.push_back(b.bone);
+        track.PushSent(track.Fill(std::move(pose)), m.time.server_time_us / 1000, now_ms, &carried);
+    } else {
+        track.Push(track.Fill(std::move(pose)), now_ms);
+    }
     // Skeletons not heard from for a while (a piece put away, the other age).
     std::erase_if(tracks, [&](const auto& kv) {
         return now_ms - std::min(now_ms, kv.second.last_ms()) > kTrackForgetMs;

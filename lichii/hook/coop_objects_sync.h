@@ -140,6 +140,23 @@ bool IsShared(std::string_view name);
 // own. Any thread; meant to be set once, before sharing starts.
 void ShareFriendly(bool on);
 
+// With ShareFriendly off: townspeople (Npc_) are shared all the same, animals
+// not, except the NPCs that act for one player (IsOwnNpc). Off by default (no
+// change for the emulator and Hookshot builds, where ShareFriendly is on); the
+// NX2navi port turns it on, so a townsperson stands and walks at the same
+// place in every game while each game's own talk still runs on its copy (a
+// townsperson's copy is not held from its AI). Any thread; set once.
+void ShareNpcs(bool on);
+
+// An NPC whose moves are a story event, an escort, a minigame or a story gate
+// of one player's: the owl, Sheik, Zelda, Impa, Ruto, Nabooru, Darunia, the
+// sages, the Great Fairies, Jabu-Jabu, the Deku Tree Sprout, the Skull Kid,
+// Saria, Mido and the Kokiri at the forest exit (their stepping aside is each
+// game's own schedule from the shared flags), Pierre and Bonooru, the running
+// man, Dampe, Kotake and Koume, the bosses, helpers and event starters. Only
+// read by ShareNpcs.
+bool IsOwnNpc(std::string_view name);
+
 // Every enemy's AS slots, not only a boss's (off by default: the emulator
 // build's behaviour). An enemy's body animation is not all in slot 0: a
 // Stalchild walks on slots 1 and 2 ("Wait" / "WaitUpper", "WalkUpper") and

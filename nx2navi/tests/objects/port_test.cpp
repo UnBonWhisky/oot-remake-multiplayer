@@ -94,6 +94,28 @@ TEST_CASE("objects port: townspeople and animals are each game's own unless obje
     CoopObjects::ShareFriendly(true);  // the hook files' default, for the other cases
 }
 
+TEST_CASE("objects port: with ShareNpcs townspeople are shared, animals and one player's NPCs not") {
+    CoopObjects::ShareFriendly(false);
+    CoopObjects::ShareNpcs(true);
+    for (const char* name : {"Npc_Hylia_Malon_Adult", "Npc_Hylia_Ingo_002_Adult", "Npc_Hylia_013_Child",
+                             "Npc_Goron_GON_001_Rgh", "Npc_Kokiri_002_Child", "Npc_Hylia_Soldier_001",
+                             "Npc_Kokiri_007_Child"}) {  // the exit Kokiri: the gate is the group's now
+        CAPTURE(name);
+        CHECK(CoopObjects::IsShared(name));
+    }
+    for (const char* name : {"Animal_Horse", "Animal_Cucco", "Npc_Navi", "Npc_Kaepora", "Npc_Hylia_Zelda_Child",
+                             "Npc_Zora_Ruto_Child", "Npc_Kokiri_Mido_Child",
+                             "Npc_Kokiri_Saria_Child", "Npc_Hylia_Fishman_001_Child", "Npc_DungeonBoss_PhantomGanon",
+                             "Npc_Equipment_007", "Npc_Invisible_Hylia"}) {
+        CAPTURE(name);
+        CHECK_FALSE(CoopObjects::IsShared(name));
+    }
+    CoopObjects::ShareNpcs(false);
+    CHECK_FALSE(CoopObjects::IsShared("Npc_Hylia_Malon_Adult"));
+    CoopObjects::ShareFriendly(true);  // the hook files' default (ShareNpcs then plays no part)
+    CHECK(CoopObjects::IsShared("Npc_Kokiri_Mido_Child"));
+}
+
 TEST_CASE("objects port: an unreadable frame is not a scene change (run s1: enemies shared twice)") {
     using Objects::SceneGate;
     const std::optional<std::string> field = std::string("HyruleField_Adult");

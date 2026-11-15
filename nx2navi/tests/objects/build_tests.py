@@ -33,14 +33,15 @@ HOOK = ['lichii/hook/' + n for n in (
     'coop_flags.cpp', 'coop_boss.cpp', 'coop_boss_game.cpp', 'coop_dungeon.cpp',
     'coop_scrubs.cpp', 'coop_platforms.cpp', 'coop_counters.cpp', 'coop_enemy_shots.cpp', 'coop_rooms.cpp',
     'coop_pvp.cpp', 'coop_puppet_sound.cpp', 'coop_pvp_game.cpp', 'coop_ocarina_sound.cpp', 'coop_colors.cpp',
-    'coop_time.cpp', 'coop_time_sync.cpp')]
+    'coop_time.cpp', 'coop_time_sync.cpp', 'coop_quests.cpp', 'coop_story.cpp')]
 # ...and what the DLL already links (nx2navi/build.py DLL_MAIN), for the tests only.
-HOOK_IN_DLL = ['lichii/hook/' + n for n in ('coop_puppet.cpp', 'coop_pose.cpp', 'coop_camera.cpp')]
+HOOK_IN_DLL = ['lichii/hook/' + n for n in ('coop_puppet.cpp', 'coop_pose.cpp', 'coop_camera.cpp', 'coop_talks.cpp')]
 TESTS = ['tests/main.cpp', 'nx2navi/tests/objects/fake_game.cpp',
          'nx2navi/tests/objects/port_test.cpp', 'nx2navi/tests/objects/two_games_test.cpp',
          'nx2navi/tests/objects/loopback_test.cpp',
          # The shared code's own cases for the files this port changed or leans on.
-         'tests/lichii/objects_test.cpp', 'tests/lichii/boss_test.cpp', 'tests/lichii/world_test.cpp']
+         'tests/lichii/objects_test.cpp', 'tests/lichii/boss_test.cpp', 'tests/lichii/world_test.cpp',
+         'tests/lichii/quests_test.cpp', 'tests/lichii/pose_test.cpp', 'tests/lichii/talks_test.cpp']
 EXTRA_INCLUDES = ['nx2navi/dll/objects/shim', 'nx2navi/dll/objects', 'nx2navi/tests/objects']
 
 

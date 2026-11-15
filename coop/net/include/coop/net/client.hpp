@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <variant>
+
 // The co-op client: one connection to the server over ENet, used by the test
 // tool, Lichii and the recomp alike. No game code and no threads: the host
 // loop calls service() every frame (or more often), and reads what happened
@@ -422,6 +425,14 @@ class Client {
   // or connected; the server PINGs every 250 ms, so a few seconds of quiet
   // means its packets do not reach us.
   LinkInfo link() const;
+  // Messages and their encoded bytes sent and received, by message type (the
+  // index in protocol::Message), since the client was made. For a build's
+  // traffic report; nothing reads it to decide anything.
+  struct Traffic {
+    std::array<std::uint64_t, std::variant_size_v<protocol::Message>> sent_count{}, sent_bytes{},
+        received_count{}, received_bytes{};
+  };
+  const Traffic& traffic() const { return traffic_; }
   // True once the path to the server lost full datagrams (DropReason
   // small_path): every connection from then on uses ENet's smallest, 576.
   bool small_datagrams() const { return small_datagrams_; }
@@ -493,6 +504,7 @@ class Client {
   std::uint64_t name_taken_since_us_ = 0;  // the first "name taken" in a row, 0: none
   std::uint64_t last_receive_us_ = 0;  // last packet from the server, 0: none this attempt
   LinkInfo link_;  // ENet's values, read after each service() with a peer
+  Traffic traffic_;
   std::uint32_t name_taken_retries_ = 0;
   bool small_datagrams_ = false;
   PathMark path_mark_;  // enet_path.hpp

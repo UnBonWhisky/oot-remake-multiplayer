@@ -2,6 +2,7 @@
 // upstream.hpp: lichii/hook's co-op, unchanged, driven from NX2navi's plugin
 // interface. Modelled on hookshot/src/coop_hookshot.cpp.
 #include "upstream.hpp"
+#include "coop_frame_profile.h"
 
 #include <array>
 #include <atomic>
@@ -11,7 +12,10 @@
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "common/logging.h"
@@ -21,9 +25,18 @@
 #include "coop_hold.h"
 #include "coop_hook.h"
 #include "coop_objects_sync.h"
+#include "coop_ocarina_sound.h"
 #include "coop_puppet.h"
 #include "coop_pose.h"
 #include "coop_world.h"
+#include "coop_story.h"
+#include "coop/host/game_flags.hpp"
+#include "presence.hpp"
+#include "epona.hpp"
+#include "ocarina_play.hpp"
+#include "story_start.hpp"
+#include "teleport.hpp"
+#include "coop_quests.h"
 #include "coop_puppet_config.h"
 #include "coop_puppet_sound.h"
 #include "coop_runtime.h"
@@ -543,9 +556,33 @@ std::atomic<std::uint64_t> g_own_heard{0};
 int g_emit_handle = 0;
 int g_own_debug = 0;
 
+// --- Our own Ocarina notes (lichii/hook/coop_ocarina_sound.h wants the pad's buttons word, which NX2navi does
+// not hand a plugin): the game's own note sound `Ocarina_<note>` that a sound user starts while our Link plays the
+// Ocarina is the note itself; the hook's sender is given the button of that note for a short while (PadButtons). ---
+std::atomic<bool> g_ocarina_playing{false};     // our Link's command is the Ocarina being played (each frame)
+std::atomic<std::uint64_t> g_ocarina_note{0};   // (steady ms << 8) | the note's index + 1
+std::atomic<bool> g_ocarina_notes_on{true};
+std::atomic<std::uint64_t> g_ocarina_notes_heard{0};
+constexpr std::uint64_t kOcarinaHoldMs = 300;
+void NoteOcarinaSound(const char* name) {
+    constexpr std::string_view kHead = "Ocarina_";
+    const std::string_view n(name);
+    if (n.substr(0, kHead.size()) != kHead) {
+        return;
+    }
+    for (std::uint8_t i = 1; i <= CoopOcarinaSound::kNoteCount; ++i) {
+        if (n.substr(kHead.size()) == CoopOcarinaSound::NoteName(i)) {
+            g_ocarina_note.store((SteadyMs() << 8) | i, std::memory_order_relaxed);
+            g_ocarina_notes_heard.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 void OnEmit(Nx2HookCall* call, void*) {
     const std::uint64_t user = call->x[0];
-    if (user == 0 || (user != g_own_user.load(std::memory_order_relaxed) && g_own_debug < 2)) {
+    const bool playing =
+        g_ocarina_notes_on.load(std::memory_order_relaxed) && g_ocarina_playing.load(std::memory_order_relaxed);
+    if (user == 0 || (user != g_own_user.load(std::memory_order_relaxed) && g_own_debug < 2 && !playing)) {
         return;
     }
     const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
@@ -558,7 +595,13 @@ void OnEmit(Nx2HookCall* call, void*) {
     if (!PuppetFx::SoundName(name)) {
         return;
     }
+    if (playing) {
+        NoteOcarinaSound(name);
+    }
     if (user != g_own_user.load(std::memory_order_relaxed)) {
+        if (g_own_debug < 2) {
+            return;
+        }
         if (g_log != nullptr) {  // OOT_COOP_DEBUG_OWN_SOUNDS=2: every user's
             g_log((std::string("sound: another user ") + std::to_string(user) + " starts '" + name + "'").c_str());
         }
@@ -769,6 +812,11 @@ void OnSignGate(Nx2HookCall* call, void*) {
 }
 
 #include "item_get_step.inc"
+#include "presence_step.inc"
+#include "epona_step.inc"
+#include "ocarina_play_step.inc"
+std::mutex g_story_mutex;
+std::vector<StoryStart::Start> g_story_out;  // our own story cutscene starts, for every game (story_start.hpp)
 
 // --- Floor switches pressed by any player are down in every game (step_switch.hpp) ---
 // The step switch's selector `SelectorSwitchStepBootup` (evaluate main+0x11a4920, x0 = the node): [node+0x58]
@@ -809,6 +857,75 @@ void OnStepSelector(Nx2HookCall* call, void*) {
     }
 }
 
+// --- One talker per NPC (talk_lock.hpp) ---
+TalkLock::Lock g_talk;
+std::atomic<bool> g_talk_on{false};
+void OnTalkRequest(Nx2HookCall* call, void*) {
+    const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
+    if (api == nullptr || static_cast<std::uint32_t>(call->x[1]) != 2) {  // 2: OnPlayerTalk
+        return;
+    }
+    auto word = [api](std::uint64_t at) {
+        std::uint64_t v = 0;
+        return at >= 0x10000 && api->read(at, &v, 8) == 1 ? v : 0;
+    };
+    const std::uint64_t owner = word(call->x[0] + 0x18);
+    const std::uint64_t placement = owner != 0 ? word(owner + 0x3d8) : 0;
+    const std::uint64_t hash = placement != 0 ? word(placement + 0x88) : 0;
+    if (hash == 0 || hash == ~std::uint64_t{0}) {
+        return;
+    }
+    if (g_talk.Request(hash, SteadyUs()) != 0) {
+        call->skip = 1;
+        call->x[0] = 0;  // no event asked: the talk does not start
+    }
+}
+
+// --- The Hookshot and Longshot in a puppet's hand ---
+// Run eq4: a puppet given the Hookshot crashed its game 60 ms later, reading 0x7d8 in main+0x2e37c30. That function
+// (a held piece's, x0 = its component, the piece at [x0+0x18]) finds the piece's wearer and reads a u32 at +0x7d8 of
+// the wearer's part [[wearer+0x270]+0x358], which a player's Link has and a puppet has not (0 there), and hands it
+// to a parameter of the piece. The hook leaves the call out when the piece is in the hand of a puppet whose part is
+// 0, so the piece shows in the hand and only that parameter is not set. OOT_COOP_HELD_HOOKSHOT=0 puts the Hookshot
+// and Longshot out of puppets' hands again (the hook is not set).
+std::array<std::atomic<std::uint64_t>, 17> g_puppet_actors{};  // live puppets by player number (the frame step)
+std::atomic<std::uint64_t> g_hookshot_guarded{0};
+void OnHeldPieceWearer(Nx2HookCall* call, void*) {
+    const Nx2PluginApi* api = g_api.load(std::memory_order_acquire);
+    if (api == nullptr) {
+        return;
+    }
+    auto word = [api](std::uint64_t at) {
+        std::uint64_t v = 0;
+        return at >= 0x10000 && api->read(at, &v, 8) == 1 ? v : 0;
+    };
+    const std::uint64_t piece = word(call->x[0] + 0x18);
+    if (piece == 0) {
+        return;
+    }
+    namespace pa = CoopPuppet::addr;
+    for (const auto& slot : g_puppet_actors) {
+        const std::uint64_t actor = slot.load(std::memory_order_relaxed);
+        const std::uint64_t parts = actor != 0 ? word(actor + pa::kActorParts) : 0;
+        if (parts == 0 || word(parts + 0x358) != 0) {
+            continue;  // no puppet, or it has the part: the call is safe
+        }
+        const std::uint64_t eu = word(parts + pa::kPartsEquipmentUser);
+        for (std::uint64_t s = 0; eu != 0 && s < 8; ++s) {
+            const std::uint64_t holder = word(eu + pa::kEquipSlots + pa::kEquipSlotStride * s + pa::kEquipSlotHolder);
+            if (holder != 0 && word(holder + pa::kHolderActor) == piece) {
+                call->skip = 1;
+                call->x[0] = 0;  // one that answers: nothing / false
+                if (g_hookshot_guarded.fetch_add(1, std::memory_order_relaxed) == 0) {
+                    CoopRuntime::Log("held piece: a piece in a puppet's hand asks its wearer for a part a puppet has "
+                                     "not (main+0x2e37c30 and three more); those calls are left out for puppets");
+                }
+                return;
+            }
+        }
+    }
+}
+
 // --- A struck player's puppet turns red as the game's own Link does (puppet_fx.hpp) ---
 std::array<std::atomic<std::uint64_t>, 5> g_hurt_ms{};  // when each player was last struck (steady ms), 0 none
 std::array<std::uint8_t, 5> g_flash_state{};            // the calc thread: 1 while a ratio above 0 is written
@@ -817,6 +934,17 @@ bool g_blink = false;
 std::atomic<std::uint64_t> g_flashes{0};
 
 void FlashStep(CoopPuppet::Guest& guest, std::uint64_t now_ms) {
+    {
+        std::array<std::uint64_t, 17> live{};
+        for (const auto& slot : CoopPuppet::TheDirector().Slots()) {
+            if (slot.number < live.size() && slot.phase == CoopPuppet::Phase::live) {
+                live[slot.number] = slot.actor;
+            }
+        }
+        for (std::size_t i = 0; i < live.size(); ++i) {
+            g_puppet_actors[i].store(live[i], std::memory_order_relaxed);
+        }
+    }
     for (const auto& slot : CoopPuppet::TheDirector().Slots()) {
         if (slot.number == 0 || slot.number >= g_hurt_ms.size()) {
             continue;
@@ -916,6 +1044,7 @@ void Configure(const Settings& s, const std::filesystem::path& mod_folder, void 
     }
     // This port's own rules in the shared enemies' code (lichii/hook/coop_objects_sync.h).
     CoopObjects::ShareFriendly(s.objects_friendly);
+    CoopObjects::ShareNpcs(s.objects_npcs);
     {
         const char* slots = std::getenv("OOT_COOP_ENEMY_SLOTS");
         CoopObjects::EnemySlots(slots == nullptr || std::string_view(slots) != "0");
@@ -954,6 +1083,18 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
     });
     CoopCallers::Add(kVoiceOrder, VoiceStep);
     CoopCallers::Add(kItemOrder, ItemStep);
+    if (const char* e = std::getenv("OOT_COOP_PRESENCE"); e != nullptr && std::string_view(e) == "0") {
+        g_presence_on = false;
+    }
+    CoopCallers::Add(kPresenceOrder, PresenceStep);
+    if (const char* e = std::getenv("OOT_COOP_EPONA_NOW"); e != nullptr && std::string_view(e) == "0") {
+        g_epona_on = false;
+    }
+    CoopCallers::Add(kEponaOrder, EponaStep);
+    if (const char* e = std::getenv("OOT_COOP_OCARINA_PLAY"); e != nullptr && std::string_view(e) == "0") {
+        g_ocarina_play_on = false;
+    }
+    CoopCallers::Add(kOcarinaPlayOrder, OcarinaPlayStep);
     {
         const char* e = std::getenv("OOT_COOP_DEBUG_OWN_SOUNDS");
         g_own_debug = e != nullptr ? std::atoi(e) : 0;
@@ -981,6 +1122,23 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
             api->hook_function(main_base + at, OnSignTrace, nullptr);
         }
     }
+    if (const char* e = std::getenv("OOT_COOP_HELD_HOOKSHOT"); e == nullptr || std::string_view(e) != "0") {
+        // Runs hq1, hq2: with only the first left out, the joiner died in the next one, main+0x2e37cb0 (called by
+        // the piece's update main+0x2e37af0 the same way, x0 = its component), reading 0x2c; run hq3, with both
+        // left out, in main+0x2e37eb0 reading 0x7d8; run hq5, in main+0x2e38080 reading 0x2c. Every function of that
+        // component that looks the wearer up from the piece ([[piece+0x270]+0x1d8], main+0x9375f0) and reads its
+        // parts is guarded, but its update main+0x2e37af0 itself, which also runs the piece's base update.
+        bool guarded = true;
+        for (const std::uint64_t at : {0x2e37c30ull, 0x2e37cb0ull, 0x2e37eb0ull, 0x2e38080ull, 0x2e38600ull}) {
+            guarded = api->hook_function(main_base + at, OnHeldPieceWearer, nullptr) > 0 && guarded;
+        }
+        if (guarded) {
+            CoopPuppet::SetNoHeldHookshot(false);  // the hook keeps the piece's call safe: in the hand again
+        }
+    }
+    if (const char* e = std::getenv("OOT_COOP_TALK_LOCK"); e == nullptr || std::string_view(e) != "0") {
+        g_talk_on = api->hook_function(main_base + 0xbd1670, OnTalkRequest, nullptr) > 0;
+    }
     if (const char* e = std::getenv("OOT_COOP_SWITCHES"); e == nullptr || std::string_view(e) != "0") {
         g_switches_on = api->hook_function(main_base + 0x11a4920, OnStepSelector, nullptr) > 0;
     }
@@ -995,13 +1153,36 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
              main_base, g_build.substr(0, 16), g_frame_handle > 0 ? "on" : "REFUSED",
              g_step_handle > 0 ? "on" : "REFUSED", g_counter_handle > 0 ? "on" : "refused",
              g_hold3 ? (brain ? "on (a held copy's AI update main+0xcb9c0 left out)" : "REFUSED") : "off");
+    if (const char* e = std::getenv("OOT_COOP_SCENES_EVERYONE"); e == nullptr || std::string_view(e) != "0") {
+        CoopHook::SetStoryCallbacks(
+            [](const std::string& scene, const std::string& name) {
+                std::lock_guard lock(g_story_mutex);
+                if (g_story_out.size() < 8) {
+                    g_story_out.push_back({scene, name});
+                }
+            },
+            [](std::uint8_t player, const float* at) {
+                return at != nullptr ? CoopNx2navi::Teleport::MoveNear(at[0], at[1], at[2])
+                                     : CoopNx2navi::Teleport::GoTo(player);
+            });
+    }
     CoopHook::Start();
     return true;
+}
+
+void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+    CoopHook::OfferStoryStart(player, scene, name);
+}
+
+std::vector<StoryStart::Start> TakeOwnStoryStarts() {
+    std::lock_guard lock(g_story_mutex);
+    return std::exchange(g_story_out, {});
 }
 
 bool SendChat(const std::string& text) { return g_on && CoopHook::SendChat(text); }
 
 StepSwitch::Switches* Switches() { return g_switches_on.load() ? &g_switches : nullptr; }
+TalkLock::Lock* Talk() { return g_talk_on.load() ? &g_talk : nullptr; }
 void AskItemScene(const std::string& actor, const std::array<float, 3>& at) {
     std::lock_guard lock(g_item.mutex);
     g_item.scene = std::make_pair(actor, at);
@@ -1012,7 +1193,17 @@ void AskFanfare(int type) {
 }
 int TakeItemDone() { return g_item_done.exchange(0); }
 void NoteEvent(bool event) { g_item_event = event; }
+void NoteInGame(bool in_game) { g_presence_in_game = in_game; }
+void NoteOurPlace(const std::array<float, 3>& at) {
+    std::lock_guard lock(g_epona.mutex);
+    std::memcpy(g_epona.place, at.data(), sizeof g_epona.place);
+    g_epona.place_known = true;
+}
+void NoteOcarina(bool playing) { g_ocarina_playing = playing; }
+std::uint64_t OcarinaNotesHeard() { return g_ocarina_notes_heard.load(); }
 std::uint64_t SwitchCalls() { return g_switch_calls.load(std::memory_order_relaxed); }
+
+void PuppetNote(std::uint8_t player, std::uint8_t note) { QueuePuppetNote(player, note); }
 
 void PuppetSound(std::uint8_t player, const std::string& asset,
                  std::vector<std::pair<std::uint8_t, std::uint32_t>> props) {
@@ -1062,6 +1253,26 @@ std::string StatusText() {
                   static_cast<double>(g_worst_us.exchange(0)) / 1000.0, static_cast<unsigned long long>(g_calls.load()),
                   g_broken ? " (a call was refused: none since)" : "");
     std::string line = text;
+    {
+        // Since the last status line only (the figures above are since the start, loads included).
+        static std::uint64_t last_frames = 0, last_us = 0, last_steps = 0, last_step_us = 0;
+        const std::uint64_t us = g_frame_us.load(), step_us = g_step_us.load();
+        const std::uint64_t df = frames - last_frames, ds = steps - last_steps;
+        std::snprintf(text, sizeof(text), ", since the last line %.3f ms a frame, %.3f ms a frame step",
+                      df != 0 ? static_cast<double>(us - last_us) / 1000.0 / static_cast<double>(df) : 0.0,
+                      ds != 0 ? static_cast<double>(step_us - last_step_us) / 1000.0 / static_cast<double>(ds) : 0.0);
+        line += text;
+        last_frames = frames, last_us = us, last_steps = steps, last_step_us = step_us;
+    }
+    // The hook's frame by part since the last status line (lichii/hook/coop_frame_profile.h), in ms a frame.
+    if (const CoopFrameProfile::Taken parts = CoopFrameProfile::Take(); parts.frames > 0) {
+        line += ", frame parts (ms):";
+        for (int i = 0; i < CoopFrameProfile::kCount; ++i) {
+            std::snprintf(text, sizeof(text), " %s %.3f", CoopFrameProfile::Name(i),
+                          static_cast<double>(parts.ns[i]) / 1e6 / static_cast<double>(parts.frames));
+            line += text;
+        }
+    }
     std::snprintf(text, sizeof(text),
                   ", sounds: %llu of our Link's heard%s, %llu played on puppets, %llu not in their set, %llu too "
                   "late; %llu red flashes",
@@ -1243,9 +1454,28 @@ void Log(const std::string& line) {
     if (text.rfind("notice: ", 0) == 0) {  // "Saria got the Hookshot", "Mido opened a chest"
         Overlay::Notice(std::string(text.substr(8)));
     }
+    // Another player's quest step that reached us ("quests: Get_Epona ReadyForGambleRace -> Complete (shared
+    // Threads of Time; ...)"): a notice line with the quest and its new step.
+    if (const auto line = CoopNx2navi::Ui::QuestNotice(text, CoopNx2navi::Ui::French())) {
+        Overlay::Notice(*line);
+    }
 }
-bool PadButtons(std::uint64_t&) {
-    return false;  // NX2navi hands a plugin button events, not the word: own Ocarina notes are not sent yet
+bool PadButtons(std::uint64_t& buttons) {
+    // The note our game sounded last (OnEmit), as the button that plays it, for kOcarinaHoldMs.
+    using namespace CoopNx2navi::Up;
+    buttons = 0;
+    const std::uint64_t v = g_ocarina_note.load(std::memory_order_relaxed);
+    if (v != 0 && SteadyMs() - (v >> 8) < kOcarinaHoldMs) {
+        switch (v & 0xff) {
+        case 4: buttons = CoopOcarinaSound::kButtonL; break;
+        case 7: buttons = CoopOcarinaSound::kButtonR; break;
+        case 11: buttons = CoopOcarinaSound::kButtonY; break;
+        case 13: buttons = CoopOcarinaSound::kButtonX; break;
+        case 16: buttons = CoopOcarinaSound::kButtonA; break;
+        default: break;  // a bent note: the five buttons only
+        }
+    }
+    return true;
 }
 }  // namespace CoopRuntime
 

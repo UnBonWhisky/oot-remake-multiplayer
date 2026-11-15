@@ -12,6 +12,7 @@
 // view_mutex. OnFrame never holds two at once.
 
 #include "coop_hook.h"
+#include "coop_frame_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <fmt/format.h>
@@ -72,6 +74,7 @@
 #include "coop_quest.h"
 #include "coop_story.h"
 #include "coop_quests.h"
+#include "coop_talks.h"
 #include "coop_live_events.h"
 #include "coop_shared_scenes.h"
 #include "coop_objects.h"
@@ -91,6 +94,10 @@
 
 namespace CoopHook {
 namespace {
+// Shared story cutscenes for every player, wherever (coop_shared_scenes.h, everyone mode): set by a build.
+void (*g_own_story_start)(const std::string& scene, const std::string& name) = nullptr;
+bool (*g_story_bring)(std::uint8_t player, const float* at) = nullptr;
+
 
 // The game and build the addresses in coop/host are for.
 constexpr u64 kOcarinaProgramId = 0x0400486024DEC000ULL;
@@ -267,6 +274,7 @@ public:
         if (flag_error.empty()) CoopDungeon::AddShared(session.shared);  // docs/dungeon.md
         if (flag_error.empty()) CoopStory::AddShared(session.shared);  // docs/flags.md, "Story and cutscenes"
         if (flag_error.empty()) CoopQuests::AddShared(session.shared);  // docs/flags.md, "Threads of Time"
+        if (flag_error.empty()) CoopTalks::AddShared(session.shared);  // NPC talk progress (a build's choice)
         if (flag_error.empty()) CoopChests::AddShared(session.shared);  // docs/items.md, "Chests"
         if (!flag_error.empty()) {
             LOG_ERROR(Core, "coop: {}; flags are not shared", flag_error);
@@ -348,6 +356,9 @@ public:
         }
         // Shared story cutscenes: they start by the live-event requester.
         shared_scenes_ = live_events_ && CoopSharedScenes::OnFromEnv(EnvString("LICHII_COOP_SHARED_CUTSCENES"));
+        if (EnvString("LICHII_COOP_SHARED_SCENES_EVERYONE") == "0") {
+            shared_joiner_.SetEveryone(false);
+        }
         LOG_INFO(Core, "coop: cutscene: shared story cutscenes {}",
                  shared_scenes_ ? "on (off with LICHII_COOP_SHARED_CUTSCENES=0)" : "off");
         if (CoopDungeon::On()) {  // room switch flags the game resets itself: one way, no load write-back
@@ -390,9 +401,41 @@ public:
     }
 
     void Frame(Core::System& system) {
+        CoopFrameProfile::Lap lap;  // coop_frame_profile.h: nothing unless the build asks for it
         FrameView view;
         view.at = Clock::now();
         const auto reading = Read(system, view);
+#if defined(COOP_FLAG_READ_CACHE) && COOP_FLAG_READ_CACHE
+        // A build with the flag read cache (coop/host/game_flags.hpp): on, unless
+        // LICHII_COOP_FLAG_READ_CACHE=0 (for comparing).
+        static const bool flag_cache_on = [] {
+            const char* e = std::getenv("LICHII_COOP_FLAG_READ_CACHE");
+            const bool on = e == nullptr || std::string_view(e) != "0";
+            coop::host::set_flag_read_cache(on);
+            return on;
+        }();
+        (void)flag_cache_on;
+        // LICHII_COOP_FLAG_READ_CACHE_CHECK=1 (a debug mode): every read the cache answers is read again the plain
+        // way and compared; a line every 30 s gives the counts.
+        static const bool flag_cache_check = [] {
+            const char* e = std::getenv("LICHII_COOP_FLAG_READ_CACHE_CHECK");
+            const bool on = e != nullptr && std::string_view(e) == "1";
+            coop::host::set_flag_read_cache_check(on);
+            return on;
+        }();
+        if (flag_cache_check && view.at - flag_check_said_ >= std::chrono::seconds(30)) {
+            flag_check_said_ = view.at;
+            const auto c = coop::host::flag_read_cache_check();
+            LOG_INFO(Core, "coop: flag read cache check: {} cached reads compared with plain ones, {} differed{}{}",
+                     c.compared, c.mismatches, c.last.empty() ? "" : "; last: ", c.last);
+        }
+#endif
+        // With the flag read cache: the flags' places are found again after a load or a scene change.
+        if (!reading || view.scene != flag_cache_scene_) {
+            coop::host::drop_flag_read_cache();
+            flag_cache_scene_ = view.scene;
+        }
+        lap.Mark(CoopFrameProfile::kRead);
 
         // The game's flags, when it is the right game and a list is shared.
         std::optional<EmulatorMemory> memory;
@@ -423,6 +466,7 @@ public:
             if (sharing_ && load_mend_.ready() && CoopStory::On() &&
                 quest_catch_up_.Due(CoopEvery::NowUs())) {
                 CatchUpQuests(*memory);  // issue 173: Impa comes for every player
+                MendOwnedHorse(*memory);  // Epona for every adult once one won her
             }
             if (sharing_) {
                 // A small key or token we and another player took at once: ours
@@ -504,11 +548,20 @@ public:
                              : "the event ended: Deku Scrub destroy flags from others go through");
             }
             const CoopScrubTalk::Hold talk = scrub_talk_;
-            hold.emplace(*quests, [link, scene, talk](coop::protocol::FlagKey key) {
+#if defined(LICHII_COOP_HOLD_FLAGS_ON_TITLE) && LICHII_COOP_HOLD_FLAGS_ON_TITLE
+            // No Link and no scene read: the title screen or file select. A write there goes
+            // into the title's own game data before any save is loaded (lost, docs/flags.md),
+            // and the NX2navi runs saw a joiner's title stop taking the player's presses after
+            // the host's save load was written into it. Named flags wait for our Link.
+            const bool title = !reading && !view.scene;
+#else
+            const bool title = false;
+#endif
+            hold.emplace(*quests, [link, scene, talk, title](coop::protocol::FlagKey key) {
                 if (key.kind != coop::protocol::FlagKeyKind::named || key.index != 0) {
                     return false;
                 }
-                if (talk.Holds(key.hash)) {
+                if (title || talk.Holds(key.hash)) {
                     return true;
                 }
                 if (!link || !scene) {
@@ -524,7 +577,9 @@ public:
         if (memory) {  // docs/flags.md, "Saves": no scene for a while is the title screen
             session_->set_scene_readable(coop::host::PlayerReader(*memory).read_scene().has_value());
         }
+        lap.Mark(CoopFrameProfile::kFlags);
         const auto report = session_->frame(reading, hold ? &*hold : nullptr);
+        lap.Mark(CoopFrameProfile::kSession);
         if (quests) {
             for (const auto& r : quests->take_raised()) {
                 LOG_INFO(Core, "coop: quests: {} {} -> {} (shared Threads of Time; issue 193)", r.quest,
@@ -655,6 +710,7 @@ public:
                          ? "room gimmick flags from another player held until we leave this dungeon or load"
                          : "no room gimmick flags held");
         }
+        lap.Mark(CoopFrameProfile::kEvents);
         // Chat notices (docs/setup.md): what another player's change gave us.
         if (notify_ && !report.received.empty()) {
             std::uint8_t self = 0;
@@ -786,6 +842,7 @@ public:
         // Issue 144: changes from the others to actors near our Link wait while
         // our Link is in an event (a talk, a cutscene).
         CoopObjects::SetLocalEvent(reading && reading->event_running.value_or(false));
+        lap.Mark(CoopFrameProfile::kNotices);
         // Our own event hides the others (puppet, Navi, marker); playing the
         // Ocarina does not (coop/host/scene.hpp, local_event_hides).
         const bool event =
@@ -835,9 +892,12 @@ public:
                         view.scene, event, view.position,
                         reading ? reading->rotation : std::nullopt,
                         reading ? reading->animation : std::nullopt, report.server_now_us);
+        lap.Mark(CoopFrameProfile::kPuppet);
         CoopObjects::Share(system, report.connected ? session_.get() : nullptr, view.scene,
                            report.server_now_us);
+        lap.Mark(CoopFrameProfile::kObjects);
         CoopHud::Frame(report.connected ? session_.get() : nullptr);  // our hearts (PLAYER_LIFE)
+        lap.Mark(CoopFrameProfile::kHud);
         CoopSpawn::Frame(system, report.connected ? session_.get() : nullptr, view.scene, report.server_now_us);
         CoopDrops::Frame(system, report.connected ? session_.get() : nullptr, view.scene, report.server_now_us);
         if (!reading) CoopTime::Loading(report.server_now_us);  // issue 159: a reload, a death
@@ -846,6 +906,7 @@ public:
                         reading && reading->event_running.value_or(false));  // issue 192: no nudge in a cutscene
         // Boss rooms together (docs/dungeons-boss.md). Issue 148: the room's
         // "shut in" flag says when we are past its door.
+        lap.Mark(CoopFrameProfile::kSpawn);
         std::optional<bool> boss_shut_in;
         if (memory && view.scene) {
             if (const CoopBoss::Room* room = CoopBoss::RoomOfScene(*view.scene)) {
@@ -865,7 +926,9 @@ public:
                         report.connected ? session_.get() : nullptr, report.server_now_us);
         // /teleport <player> (docs/setup.md "Chat commands"), after the boss
         // rooms: it reads whether our boss fight runs.
+        lap.Mark(CoopFrameProfile::kBoss);
         CoopTeleport::Frame(system, view.game ? base_ : 0, reading, report.connected ? session_.get() : nullptr);
+        lap.Mark(CoopFrameProfile::kPort);
         // LICHII_COOP_SCENE_PROBE=1 only (docs/scenes.md "Free-play scene change").
         CoopSceneProbe::Frame(system, view.game ? base_ : 0, reading);
         for (auto& line : CoopTeleport::TakeLines()) {
@@ -878,7 +941,10 @@ public:
         for (auto& line : CoopPvp::TakeLines()) {
             chat_.Add(std::move(line), true);
         }
+        lap.Mark(CoopFrameProfile::kPvp);
         Place(view);
+        lap.Mark(CoopFrameProfile::kPlace);
+        lap.Frame();
 
         std::lock_guard lock(view_mutex_);
         frame_ = std::move(view);
@@ -1587,7 +1653,19 @@ private:
     // Shared story cutscenes (coop_shared_scenes.h).
     bool shared_scenes_ = false;  // LICHII_COOP_SHARED_CUTSCENES, needs live events
     CoopSharedScenes::Joiner shared_joiner_;
+    std::uint8_t joined_from_ = 0;       // everyone mode: the starter of the scene we joined
+    bool joined_seen_running_ = false;
+    std::uint8_t regroup_to_ = 0;        // everyone mode: after a scene, go to this starter until near
+    std::uint64_t regroup_until_us_ = 0;
+    std::uint64_t regroup_next_us_ = 0;
+    bool test_event_done_ = false;  // LICHII_COOP_TEST_EVENT
+#if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
+    CoopEvery::Every played_watch_{CoopEvery::kSecondUs};
+    std::unordered_map<std::string, std::uint64_t> played_seen_;  // shared scene -> when its flag was first seen set
+#endif
     CoopLiveEvents::StartWatch story_watch_;  // our own story cutscene starts
+    std::optional<std::string> flag_cache_scene_;  // the scene the flag read cache was filled in
+    Clock::time_point flag_check_said_{};  // LICHII_COOP_FLAG_READ_CACHE_CHECK: the last counts line
     std::vector<coop::protocol::DungeonEvent> story_events_in_;  // under dungeon_events_mutex_  // deku-dungeon-2: our own gimmick event starts
     std::mutex dungeon_events_mutex_;         // DUNGEON_EVENT from the network thread
     std::vector<coop::protocol::DungeonEvent> dungeon_events_in_;
@@ -1609,6 +1687,21 @@ private:
         return rooms;
     }
 
+public:
+    // Another player's story cutscene start told to every scene by a build (everyone mode). Any thread.
+    void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+        if (!shared_scenes_ || !CoopSharedScenes::IsShared(name)) {
+            return;
+        }
+        coop::protocol::DungeonEvent e;
+        e.player_number = player;
+        e.scene = scene;
+        e.name = name;
+        std::lock_guard lock(dungeon_events_mutex_);
+        story_events_in_.push_back(std::move(e));
+    }
+
+private:
     // Shared story cutscenes (coop_shared_scenes.h): a story cutscene
     // our game starts goes to the others in our scene (DUNGEON_EVENT, as a
     // gimmick event's start); one another player started near us plays here
@@ -1654,6 +1747,20 @@ private:
         here.can_start = reading && !running &&
                          (status & (proto::status::paused | proto::status::in_menu | proto::status::loading)) == 0;
         here.now_us = now_us;
+        here.boss_fight = CoopBoss::Fighting();
+        // Everyone mode (coop_shared_scenes.h): a start that waits for our trip is joined once we stand near
+        // its starter, so where the starters are now is told each frame while one waits.
+        if (shared_joiner_.Everyone() && shared_joiner_.Waiting() != 0 && !here.scene.empty()) {
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.scene == here.scene) {
+                    std::optional<int> room;
+                    if (const auto guess = DungeonRooms().Nearest(here.scene, r.position)) {
+                        room = guess->room;
+                    }
+                    shared_joiner_.UpdateStarter(r.number, here.scene, r.position, room);
+                }
+            }
+        }
         // In a dungeon only a starter in our own room is joined (the other
         // rooms are not loaded here: a black picture until the cutscene ends).
         if (shared_joiner_.Waiting() != 0 && here.link && CoopDungeon::IsDungeonScene(here.scene)) {
@@ -1680,6 +1787,9 @@ private:
                 LOG_INFO(Core, "coop: cutscene: {} started while our Link is dead: not shared", *found);
             }
             if (found && !dead_here && shared_joiner_.Ours(*found, here.scene)) {
+                if (g_own_story_start != nullptr) {
+                    g_own_story_start(here.scene, *found);  // a build that tells every scene, not only ours
+                }
                 proto::DungeonEvent e;
                 e.scene = here.scene;
                 e.name = *found;
@@ -1691,17 +1801,129 @@ private:
                 });
             }
         }
+#if defined(LICHII_COOP_SHARED_SCENE_FRESH) && LICHII_COOP_SHARED_SCENE_FRESH
+        // A scene's HavePlayedEvent flag is shared too, and the starter's game sets it as the scene
+        // begins: it can reach us with (or before) the start, and the scene then counted as "played
+        // already" here. So the flags of the shared scenes are watched once a second, and a scene
+        // whose flag was first seen set less than kFreshUs before its start came is still joined.
+        if (memory && played_watch_.Due(now_us)) {
+            coop::host::GameFlags flags(*memory);
+            for (const std::string_view n : CoopSharedScenes::Names()) {
+                const auto v = flags.get_bool(coop::host::flag_hash("HavePlayedEvent." + std::string(n)));
+                if (!v) continue;
+                if (*v) {
+                    played_seen_.try_emplace(std::string(n), now_us);
+                } else {
+                    played_seen_.erase(std::string(n));
+                }
+            }
+        }
+        const auto name = shared_joiner_.Next(here, [&](const std::string& n, std::uint64_t at_us) {
+            constexpr std::uint64_t kFreshUs = 2'500'000;
+            const bool played = memory && coop::host::GameFlags(*memory)
+                                              .get_bool(coop::host::flag_hash("HavePlayedEvent." + n))
+                                              .value_or(false);
+            if (!played) return false;
+            const auto it = played_seen_.find(n);
+            if (it == played_seen_.end()) {
+                played_seen_.emplace(n, now_us);
+                return at_us > now_us + kFreshUs;  // first seen now: set with the start, not before it
+            }
+            return it->second + kFreshUs < at_us;
+        });
+#else
         const auto name = shared_joiner_.Next(here, [&](const std::string& n) {
             return memory && coop::host::GameFlags(*memory)
                                  .get_bool(coop::host::flag_hash("HavePlayedEvent." + n))
                                  .value_or(false);
         });
+#endif
+        // Test only: LICHII_COOP_TEST_EVENT=<seconds>:<event flow name> asks our game for that
+        // event once, that many seconds after the hook started, as a story cutscene of our own
+        // (a two-game test of the shared cutscenes without walking into the scene's trigger).
+        if (!test_event_done_ && here.link && !here.scene.empty()) {
+            static const std::pair<std::uint64_t, std::string> want = [] {
+                const char* e = std::getenv("LICHII_COOP_TEST_EVENT");
+                const std::string v = e != nullptr ? e : "";
+                const auto colon = v.find(':');
+                if (colon == std::string::npos) return std::pair<std::uint64_t, std::string>{0, {}};
+                return std::pair<std::uint64_t, std::string>{std::strtoull(v.c_str(), nullptr, 10) * 1'000'000ull,
+                                                             v.substr(colon + 1)};
+            }();
+            static const std::uint64_t started_us = now_us;
+            if (want.second.empty()) {
+                test_event_done_ = true;
+            } else if (now_us - started_us >= want.first) {
+                test_event_done_ = true;
+                LOG_INFO(Core, "coop: test: asking our game for the event {} (LICHII_COOP_TEST_EVENT)", want.second);
+                std::lock_guard lock(live_mutex_);
+                live_requester_.Want(want.second, here.scene);
+            }
+        }
+        // The starter's place when they are in our scene (a move there needs no answer from their game, which
+        // refuses a trip while its scene plays); else nothing: a trip to them.
+        const auto starter_at = [&](std::uint8_t who) -> std::optional<CoopSharedScenes::Vec3> {
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.number == who && r.scene == here.scene) {
+                    return r.position;
+                }
+            }
+            return std::nullopt;
+        };
+        if (const auto to = shared_joiner_.TakeBring()) {
+            const auto at = starter_at(*to);
+            if (g_story_bring != nullptr && g_story_bring(*to, at ? at->data() : nullptr)) {
+                LOG_INFO(Core, "coop: cutscene: going to player {} for their story cutscene", *to);
+            } else {
+                LOG_INFO(Core, "coop: cutscene: cannot go to player {} for their story cutscene (no trip here)", *to);
+            }
+        }
         for (const auto& line : shared_joiner_.TakeNotes()) {
             LOG_INFO(Core, "coop: cutscene: {}", line);
         }
         if (name) {
             std::lock_guard lock(live_mutex_);
             live_requester_.Want(*name, here.scene, now_us, CoopSharedScenes::kJoinUs);
+            joined_from_ = 0;
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.scene == here.scene) {
+                    joined_from_ = joined_from_ == 0 ? r.number : joined_from_;
+                }
+            }
+            joined_seen_running_ = false;
+        }
+        // Everyone mode: after a joined scene, everybody stands together where the starter is (the scene may
+        // have put our Link elsewhere than theirs).
+        if (shared_joiner_.Everyone() && joined_from_ != 0) {
+            if (running) {
+                joined_seen_running_ = true;
+            } else if (joined_seen_running_ && here.can_start) {
+                regroup_to_ = joined_from_;
+                regroup_until_us_ = now_us + 60'000'000;
+                regroup_next_us_ = now_us;
+                joined_from_ = 0;
+                LOG_INFO(Core, "coop: cutscene: the scene is over here: standing with player {} where it left them",
+                         regroup_to_);
+            }
+        }
+        // Until we stand within 10 m of the starter (asked again every 5 s: the starter's game refuses a trip
+        // while its own scene still plays), for up to 60 s.
+        if (regroup_to_ != 0 && now_us >= regroup_next_us_) {
+            regroup_next_us_ = now_us + 5'000'000;
+            bool near = false;
+            for (const auto& r : CoopPuppet::Collect(session_.get(), server_now_us)) {
+                if (r.number == regroup_to_ && r.scene == here.scene && here.link) {
+                    const float dx = r.position[0] - (*here.link)[0], dy = r.position[1] - (*here.link)[1],
+                                dz = r.position[2] - (*here.link)[2];
+                    near = dx * dx + dy * dy + dz * dz < 10.0f * 10.0f;
+                }
+            }
+            if (near || now_us >= regroup_until_us_) {
+                regroup_to_ = 0;
+            } else if (here.can_start && g_story_bring != nullptr &&
+                       g_story_bring(regroup_to_, starter_at(regroup_to_) ? starter_at(regroup_to_)->data() : nullptr)) {
+                LOG_INFO(Core, "coop: cutscene: going to player {} where their scene left them", regroup_to_);
+            }
         }
     }
 
@@ -1720,6 +1942,40 @@ private:
                 LOG_INFO(Core, "coop: story: quest {} {:#x} -> {:#x} (shared story; issue 173)",
                          quest.name, *was, *raise);
             }
+        }
+    }
+
+    // docs/flags.md, "Epona: the owned horse": a Get_Epona at Complete that
+    // came from another player owns no horse here, so Epona's Song did
+    // nothing; write the owned horse's name as the race's win would.
+    bool owned_horse_on_ = CoopQuests::OwnedHorseOn();
+    bool owned_horse_logged_ = false;
+    std::string owned_horse_seen_;
+    void MendOwnedHorse(EmulatorMemory& memory) {
+        if (!owned_horse_on_) {
+            return;
+        }
+        namespace ep = CoopQuests::epona;
+        coop::host::GameFlags flags(memory);
+        const auto owned = flags.get_string64_array(ep::kOwnedActor, 0);
+        const auto quest = flags.get_enum(ep::kQuest);
+        const auto child = flags.get_bool(ep::kChildhood);
+        const std::string seen = fmt::format("{:#x} {} '{}'", quest.value_or(0), child ? (*child ? 1 : 0) : -1,
+                                             owned.value_or("(unread)"));
+        if (seen != owned_horse_seen_) {
+            owned_horse_seen_ = seen;
+            LOG_INFO(Core, "coop: quests: Get_Epona / childhood / owned horse: {}", seen);
+        }
+        const auto want = CoopQuests::OwnedHorseMend(quest, child, owned);
+        if (!want) {
+            return;
+        }
+        if (coop::host::GameFlags::set_string64_array_now(memory, ep::kOwnedActor, 0, *want)) {
+            LOG_INFO(Core, "coop: quests: Get_Epona is Complete here: our owned horse is now '{}' (Epona's Song calls her)",
+                     *want);
+        } else if (!owned_horse_logged_) {
+            owned_horse_logged_ = true;
+            LOG_WARNING(Core, "coop: quests: could not write the owned horse '{}'", *want);
         }
     }
 
@@ -1896,8 +2152,10 @@ void Start() {
 }
 
 void OnFrame(Core::System& system) {
+    CoopFrameProfile::Lap lap;
     CoopObjects::OnFrame(system);
     CoopTestInput::OnFrame(system);
+    lap.Mark(CoopFrameProfile::kObjectsPre);
     Start();
     // g_coop only changes in Start (before this), End (which keeps the old
     // one alive until Shutdown) and Shutdown (after
@@ -2000,6 +2258,21 @@ std::vector<PlayerRow> PlayerList() {
         return coop->PlayerList();
     }
     return {};
+}
+
+void SetStoryCallbacks(void (*own_start)(const std::string& scene, const std::string& name),
+                       bool (*bring)(std::uint8_t player, const float* at)) {
+    g_own_story_start = own_start;
+    g_story_bring = bring;
+}
+
+void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name) {
+    if (g_mod_refused) {
+        return;
+    }
+    if (auto* coop = Get()) {
+        coop->OfferStoryStart(player, scene, name);
+    }
 }
 
 } // namespace CoopHook

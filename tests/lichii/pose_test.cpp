@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -552,4 +553,261 @@ TEST_CASE("pose: with every limb moving fast, a still bone is still sent within 
     }
     MESSAGE("longest a bone went unsent: " << worst << " ms (bound " << bound << ")");
     CHECK(worst <= bound);
+}
+
+namespace {
+CoopPose::Pose OneBone(float angle_deg, std::uint16_t bone = 3) {
+    const float h = angle_deg * 3.14159265f / 360.0f;
+    CoopPose::Pose p;
+    p.skeleton = 0x77;
+    CoopPose::BonePose b;
+    b.bone = bone;
+    b.rotation = CoopPose::Quat{0.0f, std::sin(h), 0.0f, std::cos(h)};
+    p.bones.push_back(b);
+    return p;
+}
+}  // namespace
+
+TEST_CASE("pose playout: shows the pose of the delay ago by the sender's clock, whatever the arrival jitter") {
+    CoopPose::Track track;
+    // Sent every 33 ms at angles 0, 10, 20, ...; arrivals 100 ms later with 0 to 25 ms of jitter.
+    const int jitter[] = {0, 25, 3, 18, 0, 22, 9, 1, 24, 5};
+    for (int i = 0; i < 10; ++i) {
+        track.PushSent(OneBone(10.0f * i), 1000 + 33u * i, 1100 + 33u * i + jitter[i]);
+    }
+    // Offset = least lag = 100 ms. At local 1366 with a 50 ms delay: sender 1216 = between sends 6 (1198)
+    // and 7 (1231), 18/33 of the way: 60 + 5.45 degrees.
+    const auto shown = track.PlayAt(1366, 50);
+    REQUIRE(shown);
+    REQUIRE(shown->bones.size() == 1);
+    const double angle = 2.0 * std::asin((*shown->bones[0].rotation)[1]) * 57.2957795;
+    CHECK(angle == doctest::Approx(65.45).epsilon(0.01));
+    // Behind everything: the newest, held; before everything: the oldest.
+    CHECK(CoopPose::Turned(*track.PlayAt(5000, 50), OneBone(90.0f)) < 0.05);
+    CHECK(CoopPose::Turned(*track.PlayAt(900, 50), OneBone(0.0f)) < 0.05);
+}
+
+TEST_CASE("pose playout: a pose that arrives late goes in its place, one sent twice replaces the first") {
+    CoopPose::Track track;
+    track.PushSent(OneBone(0.0f), 1000, 1100);
+    track.PushSent(OneBone(20.0f), 1066, 1166);
+    track.PushSent(OneBone(10.0f), 1033, 1170);  // late
+    track.PushSent(OneBone(12.0f), 1033, 1171);  // the same send again
+    CHECK(track.Kept() == 3);
+    const auto mid = track.PlayAt(1133 + 50, 50);  // sender 1033: the late one
+    CHECK(CoopPose::Turned(*mid, OneBone(12.0f)) < 0.05);
+    // The newest by sent time stays what Fill builds on.
+    CHECK(CoopPose::Turned(track.Fill(OneBone(20.0f, 9)), OneBone(20.0f)) < 0.05);
+}
+
+TEST_CASE("pose blend: bones in one pose only are kept, shared ones blended") {
+    CoopPose::Pose a = OneBone(0.0f, 2);
+    a.bones.push_back(OneBone(0.0f, 5).bones[0]);
+    CoopPose::Pose b = OneBone(40.0f, 5);
+    b.bones.push_back(OneBone(40.0f, 7).bones[0]);
+    const auto m = CoopPose::Blend(a, b, 0.5f);
+    REQUIRE(m.bones.size() == 3);
+    CHECK(m.bones[0].bone == 2);
+    CHECK(m.bones[1].bone == 5);
+    CHECK(m.bones[2].bone == 7);
+    CHECK(CoopPose::Turned(OneBone(20.0f, 5), m) < 0.05);
+}
+
+TEST_CASE("pose motion: steady turning has no jerk, a held frame and a catch-up have") {
+    CoopPose::Motion steady, stuttering;
+    for (int i = 0; i < 10; ++i) steady.Add(OneBone(5.0f * i));
+    const float stutter[] = {0, 5, 10, 10, 20, 25, 30, 30, 40, 45};
+    for (const float a : stutter) stuttering.Add(OneBone(a));
+    CHECK(steady.Take().find("jerk 0.00 still 0/9") != std::string::npos);
+    const std::string s = stuttering.Take();
+    CHECK(s.find("still 2/9") != std::string::npos);
+    CHECK(s.find("jerk 0.00") == std::string::npos);
+}
+
+namespace {
+// A standing Link: every bone sways a little (about 0.014 degrees a frame at its fastest, as measured in
+// runs eq4 to eq7), each with its own phase, as the game has it (floats).
+CoopPose::Pose StandingExact(double t_s, std::uint16_t bones) {
+    CoopPose::Pose p;
+    p.skeleton = 0x1234;
+    for (std::uint16_t i = 0; i < bones; ++i) {
+        const double deg = 0.15 * std::sin(2.0 * 3.14159265358979 * (t_s / 2.0 + i * 0.137));
+        const double h = (10.0 + i * 0.3 + deg) * 3.14159265358979 / 360.0;
+        CoopPose::BonePose b;
+        b.bone = i;
+        b.rotation = CoopPose::Quat{static_cast<float>(std::sin(h)), 0.0f, 0.0f, static_cast<float>(std::cos(h))};
+        p.bones.push_back(b);
+    }
+    return p;
+}
+
+
+// Jerk of the shown stream ("v .. jerk .. still ..") as a number.
+double JerkOf(const std::string& line) {
+    const auto at = line.find("jerk ");
+    return at == std::string::npos ? -1.0 : std::atof(line.c_str() + at + 5);
+}
+}  // namespace
+
+namespace {
+// The sender's picks (128 bones at most, 30 a second) through a receiver's track, shown a game frame every 33 ms
+// 7 ms after the arrival with 50 ms of playout. `pose(t_s)` is the sender's Link as the game has it.
+struct KeyRun {
+    std::string real, shown;
+    double jerk = 0.0, real_v = 0.0, shown_v = 0.0;
+    std::size_t bones_a_pose = 0;
+};
+template <typename F>
+KeyRun RunKeys(bool keyed, F pose, std::uint64_t until_ms = 16'000) {
+    CoopPose::BonePicker picker;
+    CoopPose::Track track;
+    CoopPose::Motion shown, real;
+    std::size_t carried_total = 0, sends = 0;
+    for (std::uint64_t ms = 10'000; ms < until_ms; ms += 33) {
+        const CoopPose::Pose exact = pose(ms / 1000.0);
+        std::vector<proto16::PoseBone> full;
+        for (const auto& b : exact.bones) {
+            proto16::PoseBone o;
+            o.bone = b.bone;
+            o.rotation = CoopPose::Pack(*b.rotation);
+            full.push_back(o);
+        }
+        const auto sent = picker.Pick(0x1234, full, ms, 128, keyed ? ms : 0);
+        std::vector<std::uint16_t> carried;
+        for (const auto& b : sent) carried.push_back(b.bone);
+        carried_total += carried.size();
+        ++sends;
+        track.PushSent(track.Fill(Unpacked(sent)), ms, ms + 40, keyed ? &carried : nullptr);
+        if (ms >= 11'000) {
+            shown.Add(*track.PlayAt(ms + 47, 50));
+            real.Add(pose((ms + 7 - 50) / 1000.0));
+        }
+    }
+    KeyRun r;
+    r.real = real.Take();
+    r.shown = shown.Take();
+    r.jerk = JerkOf(r.shown);
+    r.real_v = std::atof(r.real.c_str() + 2);
+    r.shown_v = std::atof(r.shown.c_str() + 2);
+    r.bones_a_pose = carried_total / sends;
+    return r;
+}
+}  // namespace
+
+TEST_CASE("pose playout: bone keys show a standing Link's slow bones smoothly, not in steps") {
+    // Every slow bone moved less than kBoneStep a pose, so it went every second to fifth pose and stepped.
+    const auto standing = [](double t) { return StandingExact(t, 300); };
+    const KeyRun stepped = RunKeys(false, standing);
+    const KeyRun keyed = RunKeys(true, standing);
+    MESSAGE("standing, real " << stepped.real);
+    MESSAGE("stepped: shown " << stepped.shown << ", " << stepped.bones_a_pose << " bones a pose");
+    MESSAGE("keyed:   shown " << keyed.shown << ", " << keyed.bones_a_pose << " bones a pose");
+    CHECK(keyed.jerk >= 0.0);
+    CHECK(keyed.jerk < stepped.jerk * 0.5);
+    CHECK(keyed.shown_v == doctest::Approx(keyed.real_v).epsilon(0.15));
+    CHECK(keyed.bones_a_pose <= stepped.bones_a_pose * 3 / 2);  // traffic: not every bone every pose
+}
+
+TEST_CASE("pose playout: bone keys leave a running Link as smooth as before") {
+    // A run: every bone swings 20 degrees back and forth at 1.25 a second, each with its own phase.
+    const auto running = [](double t) {
+        CoopPose::Pose p;
+        p.skeleton = 0x1234;
+        for (std::uint16_t i = 0; i < 300; ++i) {
+            const double deg = (i % 3 == 0 ? 20.0 : 2.0) * std::sin(2.0 * 3.14159265358979 * (t * 1.25 + i * 0.137));
+            const double h = (10.0 + i * 0.3 + deg) * 3.14159265358979 / 360.0;
+            CoopPose::BonePose b;
+            b.bone = i;
+            b.rotation = CoopPose::Quat{static_cast<float>(std::sin(h)), 0.0f, 0.0f, static_cast<float>(std::cos(h))};
+            p.bones.push_back(b);
+        }
+        return p;
+    };
+    const KeyRun stepped = RunKeys(false, running);
+    const KeyRun keyed = RunKeys(true, running);
+    MESSAGE("running, real " << stepped.real);
+    MESSAGE("stepped: shown " << stepped.shown << ", " << stepped.bones_a_pose << " bones a pose");
+    MESSAGE("keyed:   shown " << keyed.shown << ", " << keyed.bones_a_pose << " bones a pose");
+    CHECK(keyed.jerk <= stepped.jerk * 1.1);
+    CHECK(keyed.shown_v == doctest::Approx(keyed.real_v).epsilon(0.1));
+}
+
+TEST_CASE("pose playout: bone keys keep a bone that stopped where it stopped") {
+    // One bone turns 1 degree a send for five sends, then holds: the sender sends it again once the receiver's
+    // guess (going on) is off, so the receiver comes to rest at 5 degrees.
+    const auto turn = [](double t) {
+        const double deg = std::clamp((t - 10.0) / 0.033, 0.0, 5.0);
+        return OneBone(static_cast<float>(deg), 0);
+    };
+    CoopPose::BonePicker picker;
+    CoopPose::Track track;
+    for (std::uint64_t ms = 10'000; ms < 11'000; ms += 33) {
+        std::vector<proto16::PoseBone> full;
+        proto16::PoseBone o;
+        o.bone = 0;
+        o.rotation = CoopPose::Pack(*turn(ms / 1000.0).bones[0].rotation);
+        full.push_back(o);
+        const auto sent = picker.Pick(0x1234, full, ms, 128, ms);
+        std::vector<std::uint16_t> carried;
+        for (const auto& b : sent) carried.push_back(b.bone);
+        track.PushSent(track.Fill(Unpacked(sent)), ms, ms + 40, &carried);
+    }
+    auto at = [](float deg) {
+        auto p = OneBone(deg, 0);
+        p.skeleton = 0x1234;
+        return p;
+    };
+    // While it turned: in between; long after: at rest where it stopped.
+    CHECK(CoopPose::Turned(*track.PlayAt(10'040 + 66 + 16 + 50, 50), at(2.5f)) < 0.1);
+    CHECK(CoopPose::Turned(*track.PlayAt(10'040 + 900 + 50, 50), at(5.0f)) < 0.05);
+}
+
+TEST_CASE("pose playout: the frame clock steps evenly through uneven frame times") {
+    // Game frames every 33.3 ms of game time, read and shown at wall times up to 9 ms off.
+    const int jitter[] = {0, 9, -6, 4, -9, 7, 2, -3, 8, -8, 5, -1};
+    auto wall = [&](int frame) { return static_cast<std::uint64_t>(20'000 + frame * 100 / 3 + jitter[frame % 12]); };
+    CoopPose::FrameClock clock;
+    std::uint64_t last = 0;
+    int worst = 0;
+    for (int f = 0; f < 300; ++f) {
+        const std::uint64_t t = clock.Tick(wall(f));
+        if (f > 60) worst = std::max(worst, std::abs(static_cast<int>(t - last) - 33));
+        last = t;
+    }
+    MESSAGE("largest step off 33 ms after a second: " << worst << " ms");
+    CHECK(worst <= 2);
+    // A standing Link sent and shown on that clock is smoother than on the wall clock.
+    auto run = [&](bool even) {
+        CoopPose::BonePicker picker;
+        CoopPose::Track track;
+        CoopPose::Motion shown;
+        CoopPose::FrameClock send_clock, show_clock;
+        for (int f = 0; f < 240; ++f) {
+            const double game_s = 10.0 + f / 30.0;  // the pose: even game time
+            const std::uint64_t read = wall(f);
+            const std::uint64_t stamp = even ? send_clock.Tick(read) : read;
+            std::vector<proto16::PoseBone> full;
+            for (const auto& b : StandingExact(game_s, 300).bones) {
+                proto16::PoseBone o;
+                o.bone = b.bone;
+                o.rotation = CoopPose::Pack(*b.rotation);
+                full.push_back(o);
+            }
+            const auto sent = picker.Pick(0x1234, full, read, 128, stamp);
+            std::vector<std::uint16_t> carried;
+            for (const auto& b : sent) carried.push_back(b.bone);
+            track.PushSent(track.Fill(Unpacked(sent)), stamp, read + 40, &carried);
+            // Another game's frame 7 ms after the arrival (40 ms), with its own jitter.
+            const std::uint64_t show = wall(f) - jitter[f % 12] + jitter[(f + 5) % 12] + 47;
+            if (f >= 60) {
+                const std::uint64_t at = even ? show_clock.Tick(show) : show;
+                const auto p = *track.PlayAt(at, 50);
+                shown.Add(p);
+            } else if (even) show_clock.Tick(show);
+        }
+        return JerkOf(shown.Take());
+    };
+    const double uneven = run(false), even = run(true);
+    MESSAGE("standing jerk: wall clock " << uneven << ", frame clock " << even);
+    CHECK(even < uneven * 0.5);
 }

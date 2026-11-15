@@ -54,6 +54,8 @@ std::vector<std::string> TakeOutbox();
 // Any thread: a line that fades after a few seconds. A chat line also goes to
 // the history the chat box shows.
 void Notice(std::string text, bool chat = false);
+// Any thread: a large line across the picture (the item line's look), one at a time, for 4.5 s.
+void Banner(std::string text);
 // Another player's item lines since the last ask (the item-get moment, item_get.hpp).
 std::vector<std::string> TakeItemLines();
 // The game's menu was open at the last overlay frame.

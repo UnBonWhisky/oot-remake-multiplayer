@@ -34,6 +34,27 @@ const char* T(const char* english, const char* french) { return g_french.load(st
 void SetFrench(bool on) { g_french.store(on, std::memory_order_relaxed); }
 bool French() { return g_french.load(std::memory_order_relaxed); }
 
+std::optional<std::string> QuestNotice(std::string_view line, bool french) {
+    constexpr std::string_view kHead = "quests: ";
+    if (line.substr(0, kHead.size()) != kHead || line.find("(shared") == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string_view rest = line.substr(kHead.size());
+    const std::size_t space = rest.find(' ');
+    const std::size_t arrow = rest.find(" -> ");
+    if (space == std::string_view::npos || arrow == std::string_view::npos || arrow < space) {
+        return std::nullopt;
+    }
+    const std::string_view quest = rest.substr(0, space);
+    std::string_view to = rest.substr(arrow + 4);
+    to = to.substr(0, to.find(' '));
+    if (quest.empty() || to.empty()) {
+        return std::nullopt;
+    }
+    return (french ? std::string("Quête ") : std::string("Quest ")) + std::string(quest) +
+           (french ? " : " : ": ") + std::string(to);
+}
+
 std::string LinkLine(const Snapshot& s) {
     switch (s.link) {
     case Link::connected:

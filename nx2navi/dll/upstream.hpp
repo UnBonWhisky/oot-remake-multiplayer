@@ -25,6 +25,8 @@
 //   session, each frame's reading and every network event.
 #pragma once
 
+#include "story_start.hpp"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -38,6 +40,7 @@
 #include "puppet_fx.hpp"
 #include "settings.hpp"
 #include "step_switch.hpp"
+#include "talk_lock.hpp"
 
 struct Nx2PluginApi;
 
@@ -70,14 +73,27 @@ bool SendChat(const std::string& text);
 // that player has no live puppet here.
 void PuppetSound(std::uint8_t player, const std::string& asset,
                  std::vector<std::pair<std::uint8_t, std::uint32_t>> props = {});
+// Another player's Ocarina note (1..19, 0 = let go) played at their puppet with the game's own note sound
+// (ocarina_play.hpp). Any thread; made at a later frame step.
+void PuppetNote(std::uint8_t player, std::uint8_t note);
 // Floor switches (step_switch.hpp): null when the hook is off (OOT_COOP_SWITCHES=0) or was refused.
 StepSwitch::Switches* Switches();
+// One talker per NPC (talk_lock.hpp): null when the hook is off (OOT_COOP_TALK_LOCK=0) or was refused.
+TalkLock::Lock* Talk();
 std::uint64_t SwitchCalls();  // calls of the switch selector seen (status line)
 // The item-get moment (item_get.hpp): the game's get scene for this item actor beside our Link, or its fanfare.
 void AskItemScene(const std::string& actor, const std::array<float, 3>& at);
 void AskFanfare(int type);
 int TakeItemDone();          // 0 nothing, 1 the scene played, 2 it failed
 void NoteEvent(bool event);  // our Link is in an event (each frame)
+void NoteInGame(bool in_game);
+// Our own story cutscene starts since the last call (story_start.hpp), to tell every game.
+std::vector<StoryStart::Start> TakeOwnStoryStarts();
+// Another player's story cutscene start told to every game (story_start.hpp): to the hook (any thread).
+void OfferStoryStart(std::uint8_t player, const std::string& scene, const std::string& name);
+void NoteOurPlace(const std::array<float, 3>& at);  // our Link's place (each frame he is read): epona.hpp
+void NoteOcarina(bool playing);       // our Link plays the Ocarina now (each frame): its note sounds are our notes
+std::uint64_t OcarinaNotesHeard();    // note sounds of ours taken so far  // our Link is read (each frame): not the title screen or a load
 // A player was struck: their puppet's model turns red for a moment as the game's own Link does
 // (puppet_fx.hpp). Any thread.
 void PuppetHurt(std::uint8_t player);

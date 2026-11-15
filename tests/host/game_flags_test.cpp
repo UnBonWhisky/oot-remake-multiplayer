@@ -347,3 +347,111 @@ TEST_CASE("game flags: a String64 written at once into its buffer, and its type 
   CHECK(flags.find_type(0x11) == 0);
   CHECK_FALSE(flags.find_type(0x99));
 }
+
+TEST_CASE("game flags: a String64Array element read and written at once (the owned horse)") {
+  auto w = game();
+  auto& m = w.mem;
+  constexpr std::uint64_t kEntries = 0x8700000000ull, kSlots = 0x8710000000ull,
+                          kElems = 0x8720000000ull, kText = 0x8730000000ull;
+  table(m, 0x670, kEntries, kSlots, 0x90, {0x7bde80e9u});
+  m.put_u32(kEntries + 0x70, 2);         // two elements
+  m.put_u64(kEntries + 0x78, kElems);
+  zero(m, kElems, 0xa0);
+  m.put_u64(kElems, kText);              // element 0
+  m.put_u32(kElems + 8, 64);
+  m.put_u64(kElems + 0x50, kText + 64);  // element 1
+  m.put_u32(kElems + 0x58, 64);
+  zero(m, kText, 128);
+  GameFlags flags(w);
+  CHECK(flags.get_string64_array(0x7bde80e9u, 0) == "");
+  CHECK(GameFlags::set_string64_array_now(w, 0x7bde80e9u, 0, "Animal_Epona_Adult"));
+  CHECK(flags.get_string64_array(0x7bde80e9u, 0) == "Animal_Epona_Adult");
+  CHECK(flags.get_string64_array(0x7bde80e9u, 1) == "");
+  CHECK_FALSE(flags.get_string64_array(0x7bde80e9u, 2));                      // past the count
+  CHECK_FALSE(GameFlags::set_string64_array_now(w, 0x1234, 0, "x"));         // unknown
+  CHECK_FALSE(GameFlags::set_string64_array_now(w, 0x7bde80e9u, 0, std::string(64, 'a')));
+  CHECK(flags.find_type(0x7bde80e9u) == 17);
+}
+
+TEST_CASE("game flag store: the read cache reads what the plain path reads, and follows the queues") {
+  struct On {
+    On() { coop::host::set_flag_read_cache(true); coop::host::drop_flag_read_cache(); }
+    ~On() { coop::host::set_flag_read_cache(false); coop::host::drop_flag_read_cache(); }
+  } on;
+  auto w = game();
+  w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 1);
+  w.mem.put_u32(kIntEntries + 0x1c, 3);
+  w.mem.put_u8(kKeys + 16 * 2 + 0xc, 1);
+  const auto chest = protocol::FlagKey::key64_flag(0x8c44828386468bfull);
+  {
+    GameFlagStore store(w);  // one frame
+    CHECK(store.read({0x11, 0}) == protocol::FlagEntry{0x11, 0, protocol::FlagKind::boolean, 0});
+    CHECK(store.read({0x18, 0}) == protocol::FlagEntry{0x18, 0, protocol::FlagKind::boolean, 1});
+    CHECK(store.read({0x22, 0}) == protocol::FlagEntry{0x22, 0, protocol::FlagKind::int32, 3});
+    CHECK(store.read({0x33, 35}) == protocol::FlagEntry{0x33, 35, protocol::FlagKind::boolean, 1});
+    CHECK_FALSE(store.read({0x25, 0}));
+    CHECK(store.read(chest) == protocol::FlagEntry{chest, protocol::FlagKind::boolean, 1});
+    CHECK_FALSE(store.read(protocol::FlagKey::key64_flag(6)));
+    // Our own write: read back at once (the view is dropped).
+    CHECK(store.write({0x11, 0, protocol::FlagKind::boolean, 1}));
+    CHECK(store.read({0x11, 0})->value == 1);
+    CHECK(store.write({0x22, 0, protocol::FlagKind::int32, 9}));
+    CHECK(store.read({0x22, 0})->value == 9);
+  }
+  // The next frame: the game applied nothing yet, and queued a value of its own; places are kept.
+  REQUIRE(GameFlags::set_bool(w, 0x18, false));
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 0);
+    CHECK(store.read({0x11, 0})->value == 1);
+    CHECK(store.read({0x22, 0})->value == 9);
+  }
+  // A table rebuilt elsewhere (another count): its places are found again.
+  table(w.mem, 0x10, kBoolEntries + 0x1000, kBoolSlots + 0x1000, 0x18, {0x18, 0x11, 0x19});
+  w.mem.put_u32(kMgr + 0x40, 0x40000000);  // the queue applied (a new round, nothing taken)
+  w.mem.put_u8(kBoolEntries + 0x1000 + 0x16, 1);  // 0x18 is entry 0 now, true
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    CHECK(store.read({0x11, 0})->value == 0);
+    CHECK(store.read({0x19, 0}) == protocol::FlagEntry{0x19, 0, protocol::FlagKind::boolean, 0});
+  }
+}
+
+TEST_CASE("game flag store: the read cache's check compares each cached read with a plain one") {
+  struct On {
+    On() {
+      coop::host::set_flag_read_cache(true);
+      coop::host::set_flag_read_cache_check(true);
+      coop::host::drop_flag_read_cache();
+    }
+    ~On() {
+      coop::host::set_flag_read_cache(false);
+      coop::host::set_flag_read_cache_check(false);
+      coop::host::drop_flag_read_cache();
+    }
+  } on;
+  const auto before = coop::host::flag_read_cache_check();
+  auto w = game();
+  w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 1);
+  w.mem.put_u32(kIntEntries + 0x1c, 3);
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    CHECK(store.read({0x22, 0})->value == 3);
+    CHECK_FALSE(store.read({0x25, 0}));
+  }
+  auto now = coop::host::flag_read_cache_check();
+  CHECK(now.compared >= before.compared + 3);
+  CHECK(now.mismatches == before.mismatches);
+  {
+    // The game changes a value behind the frame's view (it never does inside one frame; the check would see it).
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 0);
+    CHECK(store.read({0x18, 0})->value == 1);  // the frame's view
+  }
+  now = coop::host::flag_read_cache_check();
+  CHECK(now.mismatches == before.mismatches + 1);
+  CHECK(now.last.find("cache has 1, plain has 0") != std::string::npos);
+}

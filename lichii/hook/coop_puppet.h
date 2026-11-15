@@ -524,6 +524,9 @@ private:
 // The present thread's side: what to show this frame.
 // A player's PLAYER_EQUIP as the puppet's pieces, in kGearKinds order.
 Gear GearOf(const coop::protocol::Equipment& equipment);
+// A build that defines LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT leaves the Hookshot and Longshot out of puppets' hands
+// (they crashed the NX2navi port, run eq4); a port that guards the crashing call turns that off here.
+void SetNoHeldHookshot(bool no);
 
 struct Remote {
     std::uint8_t number = 0;

@@ -25,8 +25,14 @@ public:
         CoopNx2navi::Up::Hooks hooks;
         hooks.frame = [](const std::optional<coop::host::PlayerReading>& reading, coop::host::Session* session,
                          void* user) { static_cast<Coop*>(user)->Frame(reading, session); };
-        hooks.event = [](const coop::net::Event& event, coop::net::Client&, void* user) {
+        hooks.event = [](const coop::net::Event& event, coop::net::Client& client, void* user) {
+            // One talker per NPC: the host's game decides (talk_lock.hpp); replies go with this client.
+            if (auto* talk = CoopNx2navi::Up::Talk()) {
+                talk->SetRoles(client.player_number(), client.host_number());
+            }
+            static_cast<Coop*>(user)->event_client_ = &client;
             static_cast<Coop*>(user)->OnEvent(event);
+            static_cast<Coop*>(user)->event_client_ = nullptr;
         };
         hooks.user = this;
         CoopNx2navi::Up::Configure(settings_, g_folder, LogLine, hooks);
@@ -217,6 +223,8 @@ private:
         if (session != nullptr) {
             CoopNx2navi::Teleport::Frame(reading, *session, connected, server_now, true);
             SendExtras(*session, connected, reading.has_value());
+            TalkFrame(*session, connected, reading);
+            TrafficReport(*session, connected);
         }
         ItemMoment(reading);
         for (const std::string& line : CoopNx2navi::Teleport::TakeLines()) {
@@ -348,6 +356,114 @@ private:
         CoopNx2navi::Overlay::Publish(std::move(s));
     }
 
+    // Every 30 s: what this game sent and received, by message type (the client's counters), for the traffic
+    // figures of the mod's optimisation (a line in the log, nothing decides on it).
+    template <std::size_t... I>
+    static std::uint16_t TypeAt(std::size_t i, std::index_sequence<I...>) {
+        std::uint16_t out = 0;
+        ((i == I ? (out = static_cast<std::uint16_t>(
+                        coop::protocol::type_of(coop::protocol::Message(std::in_place_index<I>))), 0)
+                 : 0), ...);
+        return out;
+    }
+    coop::net::Client::Traffic traffic_seen_{};
+    std::uint64_t traffic_us_ = 0;
+    void TrafficReport(coop::host::Session& session, bool connected) {
+        const std::uint64_t now = SteadyUs();
+        if (!connected || (traffic_us_ != 0 && now - traffic_us_ < 30'000'000)) {
+            return;
+        }
+        const double secs = traffic_us_ == 0 ? 0.0 : static_cast<double>(now - traffic_us_) / 1e6;
+        traffic_us_ = now;
+        coop::net::Client::Traffic t{};
+        session.with_client([&](coop::net::Client& client) { t = client.traffic(); });
+        if (secs > 0) {
+            constexpr std::size_t kTypes = std::variant_size_v<coop::protocol::Message>;
+            std::vector<std::pair<std::uint64_t, std::size_t>> by;
+            std::uint64_t sent = 0, got = 0, sent_n = 0, got_n = 0;
+            for (std::size_t i = 0; i < kTypes; ++i) {
+                const std::uint64_t b = (t.sent_bytes[i] - traffic_seen_.sent_bytes[i]) +
+                                        (t.received_bytes[i] - traffic_seen_.received_bytes[i]);
+                sent += t.sent_bytes[i] - traffic_seen_.sent_bytes[i];
+                got += t.received_bytes[i] - traffic_seen_.received_bytes[i];
+                sent_n += t.sent_count[i] - traffic_seen_.sent_count[i];
+                got_n += t.received_count[i] - traffic_seen_.received_count[i];
+                if (b != 0) by.emplace_back(b, i);
+            }
+            std::sort(by.rbegin(), by.rend());
+            std::string line;
+            for (std::size_t k = 0; k < by.size() && k < 8; ++k) {
+                const std::size_t i = by[k].second;
+                char part[96];
+                std::snprintf(part, sizeof part, " type %u: out %.1f KB/s (%.0f/s), in %.1f KB/s (%.0f/s);",
+                              TypeAt(i, std::make_index_sequence<kTypes>{}),
+                              static_cast<double>(t.sent_bytes[i] - traffic_seen_.sent_bytes[i]) / 1024.0 / secs,
+                              static_cast<double>(t.sent_count[i] - traffic_seen_.sent_count[i]) / secs,
+                              static_cast<double>(t.received_bytes[i] - traffic_seen_.received_bytes[i]) / 1024.0 / secs,
+                              static_cast<double>(t.received_count[i] - traffic_seen_.received_count[i]) / secs);
+                line += part;
+            }
+            g_log.Line("traffic: out %.1f KB/s in %.0f messages/s, in %.1f KB/s in %.0f messages/s (encoded, before "
+                       "encryption and ENet headers);%s",
+                       static_cast<double>(sent) / 1024.0 / secs, static_cast<double>(sent_n) / secs,
+                       static_cast<double>(got) / 1024.0 / secs, static_cast<double>(got_n) / secs, line.c_str());
+        }
+        traffic_seen_ = t;
+    }
+
+    // One talker per NPC (talk_lock.hpp): ours said to the others, theirs refuse ours here.
+    void TalkFrame(coop::host::Session& session, bool connected, const std::optional<coop::host::PlayerReading>& reading) {
+        if (const auto starts = CoopNx2navi::Up::TakeOwnStoryStarts(); connected && !starts.empty()) {
+            session.with_client([&](coop::net::Client& client) {
+                for (const auto& st : starts) {
+                    client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                            CoopNx2navi::StoryStart::kExtraStory,
+                                                            CoopNx2navi::StoryStart::Encode(st)});
+                    g_log.Line("cutscene: our story cutscene %s in %s told to every game", st.name.c_str(),
+                               st.scene.c_str());
+                }
+            });
+        }
+        auto* talk = CoopNx2navi::Up::Talk();
+        if (talk == nullptr) {
+            return;
+        }
+        const std::uint64_t now = SteadyUs();
+        if (!talk_sender_set_) {
+            // The hook's ask to the host's game goes at once, from the game's thread (talk_lock.hpp).
+            talk_sender_set_ = true;
+            talk->SetSender([this](const CoopNx2navi::TalkLock::Note& n) {
+                if (coop::host::Session* s = session_.load(); s != nullptr && connected_.load()) {
+                    s->with_client([&](coop::net::Client& client) {
+                        client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                                CoopNx2navi::TalkLock::kExtraTalk,
+                                                                CoopNx2navi::TalkLock::Encode(n)});
+                    });
+                }
+            });
+        }
+        talk->SetScene(scene_ ? *scene_ : std::string());
+        talk->Event(reading && reading->event_running.value_or(false), now);
+        for (const std::string& line : talk->TakeLines()) {
+            g_log.Line("%s", line.c_str());
+        }
+        for (const std::uint8_t player : talk->TakeRefusals()) {
+            CoopNx2navi::Overlay::Banner(CoopNx2navi::TalkLock::Refusal(Name(player), CoopNx2navi::Ui::French()));
+        }
+        // NPC copies another player talks to get none of its animations meanwhile (coop_objects.h).
+        CoopObjects::SetTalkedNpcs(talk->Others(now));
+        const auto notes = talk->TakeSends(now);
+        if (connected && !notes.empty()) {
+            session.with_client([&](coop::net::Client& client) {
+                for (const auto& n : notes) {
+                    client.send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                            CoopNx2navi::TalkLock::kExtraTalk,
+                                                            CoopNx2navi::TalkLock::Encode(n)});
+                }
+            });
+        }
+    }
+
     // Our own Link's sounds and magic for the other games.
     void SendExtras(coop::host::Session& session, bool connected, bool in_game) {
         namespace Fx = CoopNx2navi::PuppetFx;
@@ -416,6 +532,12 @@ private:
         const std::uint64_t now = SteadyUs();
         const bool event = reading && reading->event_running.value_or(false);
         CoopNx2navi::Up::NoteEvent(event);
+        CoopNx2navi::Up::NoteInGame(reading.has_value());
+        if (reading) {
+            CoopNx2navi::Up::NoteOurPlace({reading->position[0], reading->position[1], reading->position[2]});
+        }
+        CoopNx2navi::Up::NoteOcarina(reading && reading->animation &&
+                                     CoopOcarinaSound::Playing(reading->animation->name));
         const auto lines = CoopNx2navi::Overlay::TakeItemLines();
         if (!item_get_on_) {
             return;
@@ -645,6 +767,19 @@ private:
             break;
         }
         case EventKind::message:
+            // Another player's Ocarina: a notice when their notes make a song (ocarina_song.hpp).
+            if (const auto* note = std::get_if<coop::protocol::OcarinaNote>(&event.message);
+                note != nullptr && note->player_number != 0 && note->player_number < song_ears_.size()) {
+                g_log.Line("ocarina: P%u's note %u (%s)", note->player_number, note->note,
+                           note->note != 0 ? CoopOcarinaSound::AssetName(note->note).c_str() : "let go");
+                CoopNx2navi::Up::PuppetNote(note->player_number, note->note);
+                if (const auto* song = song_ears_[note->player_number].Note(note->note, SteadyUs())) {
+                    const std::string line =
+                        CoopNx2navi::OcarinaSong::Notice(Name(note->player_number), *song, CoopNx2navi::Ui::French());
+                    g_log.Line("ocarina: %s", line.c_str());
+                    CoopNx2navi::Overlay::Notice(line);
+                }
+            }
             if (const auto* extra = std::get_if<coop::protocol::PlayerExtra>(&event.message);
                 extra != nullptr && extra->player_number != 0 && extra->player_number < peer_magic_.size()) {
                 namespace Fx = CoopNx2navi::PuppetFx;
@@ -661,6 +796,34 @@ private:
                     if (const auto n = CoopNx2navi::StepSwitch::Decode(extra->data)) {
                         if (auto* switches = CoopNx2navi::Up::Switches()) {
                             switches->Remote(extra->player_number, *n, SteadyUs());
+                        }
+                    }
+                } else if (extra->kind == CoopNx2navi::StoryStart::kExtraStory) {
+                    if (const auto st = CoopNx2navi::StoryStart::Decode(extra->data)) {
+                        g_log.Line("cutscene: P%u started the story cutscene %s in %s", extra->player_number,
+                                   st->name.c_str(), st->scene.c_str());
+                        CoopNx2navi::Up::OfferStoryStart(extra->player_number, st->scene, st->name);
+                    }
+                } else if (extra->kind == CoopNx2navi::TalkLock::kExtraTalk) {
+                    if (const auto n = CoopNx2navi::TalkLock::Decode(extra->data)) {
+                        if (auto* talk = CoopNx2navi::Up::Talk()) {
+                            namespace TL = CoopNx2navi::TalkLock;
+                            const auto reply = talk->Remote(extra->player_number, *n, SteadyUs());
+                            if (reply && event_client_ != nullptr) {
+                                event_client_->send(coop::protocol::PlayerExtra{coop::protocol::kPlayerSelf,
+                                                                                TL::kExtraTalk, TL::Encode(*reply)});
+                            }
+                            for (const std::string& line : talk->TakeLines()) {
+                                g_log.Line("%s", line.c_str());
+                            }
+                            if (n->kind == TL::kNote) {
+                                g_log.Line("talk: P%u %s NPC %#llx", extra->player_number,
+                                           n->talking ? "talks to" : "stopped talking to",
+                                           static_cast<unsigned long long>(n->hash));
+                            } else if (n->kind != TL::kAsk) {
+                                g_log.Line("talk: the host's game %s P%u's talk to NPC %#llx", n->kind == TL::kGrant
+                                           ? "granted" : "refused", n->target, static_cast<unsigned long long>(n->hash));
+                            }
                         }
                     }
                 } else if (extra->kind == Fx::kExtraMagic) {
@@ -689,9 +852,12 @@ private:
         return !settings_.host_save && (server.rfind("127.", 0) == 0 || server == "localhost" || server == "::1");
     }
 
+    std::array<CoopNx2navi::OcarinaSong::Listener, 17> song_ears_{};
     CoopNx2navi::Settings settings_;
     std::string welcome_;
     std::atomic<coop::host::Session*> session_{nullptr};  // the hook's, alive until Up::Stop
+    coop::net::Client* event_client_ = nullptr;
+    bool talk_sender_set_ = false;  // during OnEvent (network thread, under the session's lock)
     std::atomic<bool> connected_{false};
     std::atomic<bool> trusted_{false};
     std::uint64_t main_base_ = CoopNx2navi::kMainBase;
