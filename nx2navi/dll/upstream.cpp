@@ -1125,10 +1125,11 @@ bool Attach(const Nx2PluginApi* api, std::uint64_t main_base) {
     if (const char* e = std::getenv("OOT_COOP_HELD_HOOKSHOT"); e == nullptr || std::string_view(e) != "0") {
         // Runs hq1, hq2: with only the first left out, the joiner died in the next one, main+0x2e37cb0 (called by
         // the piece's update main+0x2e37af0 the same way, x0 = its component), reading 0x2c; run hq3, with both
-        // left out, in main+0x2e37eb0 reading 0x7d8. The four functions of that component that read the wearer's
-        // part (+0x358, then +0x7d8; found in the lifted code) are all guarded.
+        // left out, in main+0x2e37eb0 reading 0x7d8; run hq5, in main+0x2e38080 reading 0x2c. Every function of that
+        // component that looks the wearer up from the piece ([[piece+0x270]+0x1d8], main+0x9375f0) and reads its
+        // parts is guarded, but its update main+0x2e37af0 itself, which also runs the piece's base update.
         bool guarded = true;
-        for (const std::uint64_t at : {0x2e37c30ull, 0x2e37cb0ull, 0x2e37eb0ull, 0x2e38600ull}) {
+        for (const std::uint64_t at : {0x2e37c30ull, 0x2e37cb0ull, 0x2e37eb0ull, 0x2e38080ull, 0x2e38600ull}) {
             guarded = api->hook_function(main_base + at, OnHeldPieceWearer, nullptr) > 0 && guarded;
         }
         if (guarded) {
