@@ -78,6 +78,25 @@ inline constexpr std::size_t kMaxSendBones = LICHII_COOP_POSE_SEND_BONES;
 #else
 inline constexpr std::size_t kMaxSendBones = 48;
 #endif
+// Playout (a build that defines LICHII_COOP_POSE_PLAYOUT_MS; the NX2navi build: 50). Each pose is stamped
+// with the server time its bones were read at, and the receiver shows the pose of that many milliseconds ago
+// by the sender's clock, blended between the two poses around it. Without it (0, every other build) the
+// receiver blends the last two poses from the moment the newest arrived, so an early or late arrival makes
+// the puppet jump: the network thread's send and the game's frames beat against each other at 30 a second.
+#ifdef LICHII_COOP_POSE_PLAYOUT_MS
+inline constexpr std::uint64_t kPlayoutMs = LICHII_COOP_POSE_PLAYOUT_MS;
+#else
+inline constexpr std::uint64_t kPlayoutMs = 0;
+#endif
+// The playout in use: kPlayoutMs, or 0 when the environment says LICHII_COOP_POSE_PLAYOUT=0 (for comparing).
+std::uint64_t PlayoutMs();
+// The bones a pose carries at most: kMaxSendBones, or LICHII_COOP_POSE_SEND_BONES from the environment (a test
+// switch for comparing; at most kMaxBones).
+std::size_t SendBones();
+// Playout: a pose may go this much before 1000 / kSendHz, so a 30 Hz game's frames are not skipped in turn.
+inline constexpr std::uint64_t kSendEarlyMs = 8;
+inline constexpr std::size_t kPlayoutKeep = 32;   // poses kept per track
+inline constexpr std::size_t kPlayoutLags = 64;   // arrival lags remembered (the least is the clock's offset)
 inline constexpr std::uint64_t kBoneRefreshMs = 500;
 inline constexpr std::size_t kRefreshBones = 8;
 // A bone is changed once a packed part moved more than this (in the packed
@@ -141,6 +160,11 @@ public:
     // blended, so a 30 Hz stream plays smooth at 60 frames a second.
     std::optional<Pose> At(std::uint64_t now_ms) const;
     std::uint64_t last_ms() const { return newest_ms_; }
+    // Playout (kPlayoutMs): keep `pose`, read at `sent_ms` by the sender's (server) clock, arrived at now_ms.
+    void PushSent(Pose pose, std::uint64_t sent_ms, std::uint64_t now_ms);
+    // Playout: the pose of `delay_ms` ago by the sender's clock, blended between the two kept poses around it.
+    std::optional<Pose> PlayAt(std::uint64_t now_ms, std::uint64_t delay_ms) const;
+    std::size_t Kept() const { return kept_.size(); }
     // `pose` (some bones of this track's skeleton: the sender sends only those
     // that changed most) with the bones it lacks taken from the newest pose.
     Pose Fill(Pose pose) const;
@@ -150,6 +174,30 @@ private:
     std::optional<Pose> newest_;
     std::uint64_t older_ms_ = 0;
     std::uint64_t newest_ms_ = 0;
+    struct Stamped {
+        Pose pose;
+        std::uint64_t sent_ms = 0;
+    };
+    std::vector<Stamped> kept_;            // playout: sent order
+    std::vector<std::int64_t> lags_;    // playout: arrival minus sent, the newest last
+};
+
+// Two poses of one skeleton blended bone by bone (t 0: a, 1: b); a bone in one of them only is taken from it.
+Pose Blend(const Pose& a, const Pose& b, float t);
+
+// How far a pose moved from the one before: the sum over the bones both have of the rotation's angle, in
+// degrees. For the smoothness figures of LICHII_COOP_DEBUG_POSE.
+double Turned(const Pose& before, const Pose& now);
+
+// Smoothness of a stream of poses, one a game frame: the mean motion a frame, the mean change of that motion
+// from one frame to the next (the jerk), and the frames with no motion at all.
+struct Motion {
+    std::optional<Pose> last;
+    double last_v = -1.0;
+    double v_sum = 0.0, jerk_sum = 0.0;
+    unsigned frames = 0, still = 0;
+    void Add(const Pose& pose);
+    std::string Take();  // "v 1.23 jerk 0.45 still 2/30" and zeroed
 };
 
 // The sender's side of kMaxSendBones: which of a full pose's bones to send now.

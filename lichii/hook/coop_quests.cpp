@@ -51,9 +51,10 @@ const std::vector<Quest>& Table() {
 #if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
         // Shared by their end only (complete_only, as Get_Epona), in a build that defines
         // LICHII_COOP_QUEST_ENDS: their steps look branched, so each player keeps their own, but a
-        // quest Complete in any game is Complete in all (the world opened for everyone). The names of
-        // the two Sage quests without a Sheik step name are read from their steps (Water: the Zora
-        // steps Step05_01 to _03; Spirit: the child and adult halves Step07_1 / Step07_2).
+        // quest Complete in any game is Complete in all (the world opened for everyone). Each Enum is
+        // named Step_<challenge> (Murmur3: Step_SageOfSpirit = 0x19189e9d, Step_SageOfWater = 0x560a64af,
+        // checked 2026-11-15 against the event flows' ChallengeSystemActor steps; the earlier guess had
+        // the two swapped). Their Complete is set by Dm_SY_BancChange_EscapeDungeon.
         {0x1002b466u, "Get_StoneOfFire",
          {"NotReady", "Ready", "KakarikoVillageNpc", "KakarikoVillageLetter", "DeathMtTrailIn",
           "DeathMtTrailNpc", "GoronCityIn", "GoronCityDarniaroomNpcTalk01", "GoronCityDarniaroomOpen",
@@ -61,7 +62,7 @@ const std::vector<Quest>& Table() {
           "KokiriForestIn", "SariaMelodyGet", "SariaMelodyPlay", "DodongoCavernOpne", "DungeonStart",
           "BossBattle", "EscapeDungeon", "Complete"},
          0, true},
-        {0x19189e9du, "SageOfWater",
+        {0x19189e9du, "SageOfSpirit",
          {"NotReady", "Ready", "Step01", "Step02", "Step03", "Step04", "Step05", "Step05_01", "Step05_02",
           "Step05_03", "Step06", "Step07", "Step07_pre00", "Step07_00", "Step08", "Step08_01", "Step09",
           "Step09_01", "Step10", "Complete"},
@@ -70,7 +71,7 @@ const std::vector<Quest>& Table() {
         {0x3372689bu, "Meet_DekuTree", {"NotReady", "Ready", "Step01", "Step02", "Step03", "Complete"}},
         {0x44063c4eu, "SubEvent_GetMelodySun", {"NotReady", "Ready", "GetMelodySun", "Complete"}},
 #if defined(LICHII_COOP_QUEST_ENDS) && LICHII_COOP_QUEST_ENDS
-        {0x560a64afu, "SageOfSpirit",
+        {0x560a64afu, "SageOfWater",
          {"NotReady", "Ready", "Step00", "Step01", "Step03", "Step04", "Step05", "Step06", "Step07",
           "Step07_00", "Step07_1", "Step07_1_Safety", "Step07_2", "Step08", "Complete"},
          0, true},

@@ -63,6 +63,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -98,6 +99,11 @@
 #include <set>
 
 namespace CoopObjects {
+
+namespace {
+std::mutex g_talked_mutex;
+std::vector<std::uint64_t> g_talked;  // under g_talked_mutex (SetTalkedNpcs)
+}  // namespace
 void NoteBosses(const std::vector<Seen>& seen);  // issue 109, below
 namespace {
 
@@ -2995,6 +3001,28 @@ private:
             }
         }
         NpcAnim(r, now_us, removes, wish, plays);
+        NpcCopyTest(now_us, wish, plays);
+#if defined(LICHII_COOP_NPC_COPY_NO_TALK) && LICHII_COOP_NPC_COPY_NO_TALK
+        // An NPC copy that another player talks to is given none of its owner's animations meanwhile, and no
+        // NPC copy its owner's talk animations ("Talk", "TalkTurn", ...): see SetTalkedNpcs in coop_objects.h.
+        // It shows its last other animation during the talk. LICHII_COOP_NPC_COPY_TALK=1 plays them again.
+        {
+            static const bool talk_too = EnvFlag("LICHII_COOP_NPC_COPY_TALK");
+            if (!talk_too) {
+                std::vector<u64> talked;
+                {
+                    std::lock_guard lock(g_talked_mutex);
+                    talked = g_talked;
+                }
+                std::erase_if(plays, [&](const PlayWish& p) {
+                    const auto it = names_.find(p.address);
+                    if (it == names_.end() || !it->second.first.starts_with("Npc_")) return false;
+                    return p.name.starts_with("Talk") ||
+                           std::find(talked.begin(), talked.end(), it->second.second) != talked.end();
+                });
+            }
+        }
+#endif
         TheMover().Want(main_, std::move(wish), std::move(removes), std::move(plays));
         if (now_us - drift_at_ >= kDriftLogUs) {
             const auto [moved, deleted, played, framed] = TheMover().TakeCounts();
@@ -3191,6 +3219,47 @@ private:
     std::unordered_map<u64, std::string> anim_logged_;
     unsigned anim_lines_ = 0;
     std::optional<Mover::Pose> drive_pose_;
+    // A test switch, off unless LICHII_COOP_TEST_NPC_COPY_FILE names a file:
+    // read once a second, its first two characters say whether an NPC copy
+    // (an `Npc_` actor another game owns) gets the owner's animation plays
+    // ('1' or '0') and the owner's place written ('1' or '0'). For finding
+    // which of the two leaves a copy undrawn.
+    void NpcCopyTest(u64 now_us, std::vector<Mover::Pose>& wish, std::vector<PlayWish>& plays) {
+        static const std::string file = EnvText("LICHII_COOP_TEST_NPC_COPY_FILE");
+        if (file.empty()) {
+            return;
+        }
+        if (now_us - npc_test_at_ >= 1'000'000) {
+            npc_test_at_ = now_us;
+            char mode[3] = {'1', '1', 0};
+            if (std::FILE* f = std::fopen(file.c_str(), "rb")) {
+                const std::size_t got = std::fread(mode, 1, 2, f);
+                std::fclose(f);
+                if (got < 2) mode[0] = mode[1] = '1';
+            }
+            const bool plays_on = mode[0] != '0', poses_on = mode[1] != '0';
+            if (plays_on != npc_test_plays_ || poses_on != npc_test_poses_) {
+                LOG_INFO(Core, "coop: npc-test: NPC copies get plays {}, places {}", plays_on ? "on" : "off",
+                         poses_on ? "on" : "off");
+            }
+            npc_test_plays_ = plays_on;
+            npc_test_poses_ = poses_on;
+        }
+        const auto npc = [this](u64 a) {
+            const auto it = names_.find(a);
+            return it != names_.end() && it->second.first.starts_with("Npc_");
+        };
+        if (!npc_test_plays_) {
+            std::erase_if(plays, [&](const PlayWish& p) { return npc(p.address); });
+        }
+        if (!npc_test_poses_) {
+            std::erase_if(wish, [&](const Mover::Pose& p) { return npc(p.actor); });
+        }
+    }
+    u64 npc_test_at_ = 0;
+    bool npc_test_plays_ = true;
+    bool npc_test_poses_ = true;
+
     // Issue 200 (npc-anim): the log of our event's claim and of NPC copies.
     std::size_t npc_claimed_ = 0;
     std::size_t npc_ours_ = 0;     // how many of them the server gave us (log)
@@ -3264,6 +3333,11 @@ Objects& Instance() {
 }
 
 } // namespace
+
+void SetTalkedNpcs(std::vector<std::uint64_t> hashes) {
+    std::lock_guard lock(g_talked_mutex);
+    g_talked = std::move(hashes);
+}
 
 void SetLocalEvent(bool in_event) {
     TheLocalEvent().store(in_event);

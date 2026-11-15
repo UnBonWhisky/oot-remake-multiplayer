@@ -57,6 +57,8 @@ public:
     std::vector<std::uint8_t> TakeRefusals();
     std::vector<std::string> TakeLines();
     std::uint64_t Talking() const;  // the NPC we talk to, 0 none
+    // The NPCs (placement hashes) another player talks to now.
+    std::vector<std::uint64_t> Others(std::uint64_t now_us) const;
 
 private:
     mutable std::mutex mutex_;

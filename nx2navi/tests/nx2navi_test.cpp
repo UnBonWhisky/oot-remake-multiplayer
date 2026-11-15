@@ -2547,8 +2547,13 @@ TEST_CASE("talk lock: a second player's talk to the same NPC is refused while th
     Lock c;
     c.SetScene("S");
     c.Remote(3, Note{"S", 5, true}, 0);
+    CHECK(c.Others(kHoldUs - 1) == std::vector<std::uint64_t>{5});  // for the NPC copies (SetTalkedNpcs)
     CHECK(c.Request(5, kHoldUs - 1) == 3);
     CHECK(c.Request(5, kHoldUs + 1) == 0);
+    CHECK(c.Others(kHoldUs + 1).empty());
+    c.Remote(3, Note{"S", 6, true}, kHoldUs);
+    c.Remote(3, Note{"S", 6, false}, kHoldUs + 10);
+    CHECK(c.Others(kHoldUs + 20).empty());  // ended
 }
 
 TEST_CASE("overlay: another player's quest step becomes a notice line") {

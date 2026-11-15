@@ -285,7 +285,7 @@ What the user asked after the afternoon's runs, and what is done now. Every run 
   - Now the note is emitted on the game's `Ocarina` user itself. For that note its performer is the friend's puppet (main+0x335b3f0, the call the game uses for our Link), and our Link again right after.
   - Limit: a note still sounding when the performer goes back follows our Link.
   - Run `ep22`, the host's log: each of the joiner's notes is now in the Ocarina user's list of playing sounds right after its emit (`the Ocarina user now plays: Ocarina_B`, `Ocarina_HighD`, `Ocarina_A`). **Nobody listened**: that it comes from the puppet's head, and how loud it is by distance, is not measured.
-- **One talker per NPC on the exit Kokiri: still not seen working** (runs `tk3` to `tk8`, `launcher-test	k8-sheet.png`).
+- **One talker per NPC on the exit Kokiri: still not seen working** (runs `tk3` to `tk8`, `launcher-test\tk8-sheet.png`).
   - Since he is shared, both games' logs have him at the same place (`tk5`: -80.82 115.56 -34.39 and -80.79 115.56 -34.41; `tk8`: -80.62 115.61 / 115.74 -35.09).
   - In `tk8` the host stands in front of him and talks ("Salut ! Alors, c'est comment, dehors ?"). But in the joiner's game, which held the copy, he is not drawn: the joiner gets the game's "A Parler" prompt beside the host's puppet, with no Kokiri in the picture. When the host's talk starts, the copy plays the owner's `Talk` and then leaves the joiner's actor walk (`share gone ... left`).
   - The joiner's A presses during the host's talk then asked for no talk, so the hook saw nothing to refuse and no banner showed.
@@ -300,6 +300,72 @@ What the user asked after the afternoon's runs, and what is done now. Every run 
   - `ct2_run.sh`: a player far away when the scene starts. `ct3_run.sh`: a busy player.
   - `eq_run.sh`: held items and pose smoothness. `tk3_run.sh`: one talker per NPC, on the exit Kokiri at his place read from the log.
   - `cs_chain2.sh` to `cs_chain4.sh`.
+
+
+### Since the early morning of 2026-11-15: NPC copies through a talk, one talker shown, a crash, a faster frame (branch `sync-quests-npcs`)
+
+Every run below was on save copies, two games on this PC, both windows with `NX2NAVI_BACKGROUND_WINDOW=1`. Pictures were paired by `launcher-test\pair_sheet.py`, and the profile's save hashes were unchanged after each run.
+
+- **A shared NPC copy is drawn; it was hidden by the joiner's own Link** (runs `tk9`, `tk10`).
+  - `tk9` switched the copy's animation plays and place writes off in phases of 15 s (test switch `LICHII_COOP_TEST_NPC_COPY_FILE`) and dumped the actor in both games (`OOT_COOP_DEBUG_ACTORS_DUMP=<bytes>`). The Kokiri stayed unseen in every phase. In `tk4`, before NPCs were shared, he was just as unseen in the joiner's picture.
+  - The joiner stood 1.1 m straight behind him on the camera's line, so its own Link hid him.
+  - `tk10` put the joiner 1.5 m to the side and 2 m back (`launcher-test\tk10-sheet.png`). The copy then shows at the same place, arms out in the same blocking pose, in both games.
+- **The copy left the other game when its owner talked: fixed** (runs `tk8`, `tk9`, `tk11`, `tk12`).
+  - 0.1 to 0.8 s after the owner's talk-start animation (`Wait`, then `Talk`) was played on the copy, the copy left the game's actor list for good. The other player could then neither see him nor talk to him.
+  - With no plays during the owner's talk (`tk10`) it stayed. Not playing only `Talk*` (`tk11`) was not enough.
+  - Now: an NPC copy that another player talks to is given none of its owner's animations while that talk lasts. No NPC copy is given `Talk*` animations. The port hands the talk lock's set to the hook (`CoopObjects::SetTalkedNpcs`; `LICHII_COOP_NPC_COPY_NO_TALK=1` in this build only; `LICHII_COOP_NPC_COPY_TALK=1` plays them again).
+  - `tk12` (`launcher-test\tk12-sheet.png`): the copy stays in the joiner's game through the host's whole talk and after it, in the pose it had before (the talk animations are not shown on it).
+- **One talker per NPC, seen both ways** (`tk10`, `tk12`; texts as shown):
+  - While the host talks to the exit Kokiri, the joiner's A presses start no conversation. The joiner gets the line "Host parle déjà à ce personnage" across the picture, and the same in its notices (`tk10` 02:34:42 to :48, `tk12` 03:39:33 to :53, four refusals logged).
+  - Once the host's talk ended, the joiner talked to him (`tk10`). The host's A presses then got "Joiner parle déjà à ce personnage" (five refusals logged).
+  - The joiner heard the same first line as the host ("Salut ! Alors, c'est comment, dehors ?"). A research sub-agent read why from his event flow: the greeting depends on `Npc_Kokiri_007_Child_OcarinaFirst` (0x83fd30dc, a saved Bool), not on a `HaveTalked_Special` flag. Set, the greeting is `Talk_115` "Ça fait plaisir de te revoir !". It is now shared with the talk flags (`lichii/hook/coop_talks.cpp`, 403 entries).
+  - Run `tk13` (`launcher-test	k13-sheet.png`): the host talks first and gets "Salut ! Alors, c'est comment, dehors ?". The joiner is refused three times during that talk ("Host parle déjà à ce personnage"). Its own talk, once the host's ended, opens with **"Content de te revoir, Link ! T'as un air drôlement décidé, dis..."**: the Kokiri's next greeting, because the host's talk had set the shared flag. In `tk10` and `tk12`, without the flag shared, the joiner got the first line again.
+  - A race was seen in `tk13`: the host pressed A again at the very moment its talk ended, and the joiner did too. The two requests came 33 ms apart, before either game had the other's note, so both talks started. The lock does not cover two requests closer than a network round trip.
+  - The same research found three Kokiri whose next lines depend on `HaveTalked_Special` flags: `Npc_Kokiri_010_Child`, `_002_`, `_004_`.
+- **A crash: a puppet given the Hookshot in hand** (run `eq4`). The joiner's game died 60 ms after `P1 wears held 'Weapon_Range_Hookshot'`: an access violation reading 0x7d8 in main+0x2e37c30. The piece asks its wearer for a part the puppet does not have. The Hookshot and Longshot are no longer put in a puppet's hand (`LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT=1` in this build only).
+- **Held items, side by side: not settled** (runs `eq6`, `eq8`; `launcher-test\eq6-held-zoom.png`, `eq8-sheet.png`, `eq8-held-zoom.png`).
+  - In `eq6` the joiner faced the host, and its own Link hid the puppet.
+  - In `eq8` the puppet is seen side-on but 5 m away, about 60 pixels tall. The bow held, then drawn and aimed up ("Vous n'avez pas de flèches"), shows on both, as far as that size tells.
+  - The script's other moments did not show on the host's own Link either. ZL did not raise the shield, the A press did not sheathe, and the quick ZR presses with the Hookshot, the Hammer and a bottle on the button made no visible use. The run ended before the Ocarina.
+  - With the Hookshot on the host's button, the joiner's game no longer crashed (`eq6`, `eq8`: both games ran to the end).
+- **The frame callback by part** (`lichii/hook/coop_frame_profile.h`; `LICHII_COOP_FRAME_PROFILE=1` in this build only, nothing in other builds). The status line now has `since the last line ... ms a frame` and `frame parts (ms): read ... session ... objects ...`. `launcher-test\prof.py` averages them over a time window.
+- **A faster frame: the flag read cache** (`coop/host/game_flags.cpp`; `set_flag_read_cache`, off by default, on in this build; `LICHII_COOP_FLAG_READ_CACHE=0` turns it off).
+  - The profile showed `session_->frame` (the flag watcher) taking 2.5 to 2.9 ms of a 3.0 to 3.8 ms frame, even on the title screen. Each of its ~4,400 flag reads took about a dozen reads through the plugin interface (manager, hash table, queue).
+  - Now one `GameFlagStore` (one frame) reads the manager, each table's header and its write queue once. Each flag's place (an index, never a pointer) is kept on the reading thread. It is checked against the table's pointers and sizes at every frame and dropped at a load or a scene change. Any write of ours drops the frame's view.
+  - The Bool and Int entries arrays are read whole once a frame when wanted, up to 4 MB. In `tk12` this did not lower the time further: what is left is the watcher's own map work.
+  - Measured in the field with two players and shared enemies, both games (host / joiner, ms a frame):
+
+    | Run | Build | Frame | session | objects | spawn |
+    |---|---|---|---|---|---|
+    | `tk10` | before | 3.63 / 3.46 | 2.73 / 2.52 | 0.44 / 0.48 | 0.27 / 0.27 |
+    | `eq5` | cache off (switch) | 2.91 / 3.85 | 2.12 / 2.85 | 0.38 / 0.51 | 0.25 / 0.30 |
+    | `tk11` | cache on | 1.62 / 1.64 | 0.76 / 0.77 | 0.41 / 0.43 | 0.26 / 0.26 |
+    | `tk12` | cache and whole arrays | 1.71 / 1.82 | 0.74 / 0.78 | 0.47 / 0.48 | 0.29 / 0.28 |
+    | `eq4` | cache on, Hyrule Field | 2.01 / 2.10 | 0.89 / 0.95 | 0.51 / 0.50 | 0.33 / 0.31 |
+    | `eq6` | cache and whole arrays, Hyrule Field | 1.58 / 1.82 | 0.69 / 0.83 | 0.43 / 0.50 | 0.28 / 0.31 |
+
+  - The frame step stayed 0.12 to 0.35 ms. Traffic is unchanged (`eq4` host: 25 to 33 KB/s out, 22 to 29 of it poses).
+- **Smoother puppets: playout** (`lichii/hook/coop_pose.{h,cpp}`; `LICHII_COOP_POSE_PLAYOUT_MS=50` in this build only, `LICHII_COOP_POSE_PLAYOUT=0` turns it off).
+  - Before, the receiver blended the last two poses from the moment the newest arrived. An early or late arrival restarted the blend, and the network thread's sends beat against the game's 30 frames a second.
+  - Now each pose carries the server time its bones were read at. The receiver keeps the last 32 and shows the pose of 50 ms ago by the sender's clock, blended between the two around it. The clocks' offset is the least arrival lag of the last 64. A pose may go 8 ms early, so no game frame is skipped in turn.
+  - Measured with `LICHII_COOP_DEBUG_POSE=1`: each game logs a "motion" figure every second, the degrees of bone turn a game frame (v) and its change from frame to frame (jerk), for its own Link as read and for each puppet as written. `launcher-test\motion.py` pairs the host's Link with its puppet in the joiner's game:
+
+    | Run | Playout | Idle: Link v / jerk | Idle: puppet v / jerk | Moving: Link v / jerk | Moving: puppet v / jerk |
+    |---|---|---|---|---|---|
+    | `eq5` | off | 4.30 / 0.24 | 4.97 / 2.08 | 56.1 / 23.0 | 51.4 / 28.8 |
+    | `eq4` | on | 4.39 / 0.35 | 4.53 / 1.51 | 43.3 / 25.7 | 38.6 / 22.3 |
+    | `eq6` | on | 4.41 / 0.38 | 5.44 / 2.28 | 77.6 / 41.8 | 69.2 / 36.4 |
+
+  - With playout, the puppet in motion is no jerkier than the real Link (0.87 of its jerk in `eq4` and `eq6`, against 1.25 without in `eq5`). Standing, it is still four to six times jerkier, with or without playout.
+  - It is not the 128-bone budget. Run `eq7` sent up to 320 bones a pose (`LICHII_COOP_POSE_SEND_BONES=320`, a test switch): traffic rose only from 33 to 38 KB/s, and the idle jerk stayed 2.18 (puppet) against 0.33 (Link). Moving, it was 33.2 against 34.1.
+  - Standing, a bone turns about 0.014 degrees a frame, under the sender's change step (`kBoneStep`, 8 packed units, about 0.03 degrees). So each bone is sent only every second or third frame, and steps.
+  - Not done: a smaller step costs every moving bone in every pose (about 80 KB/s a player by the constants).
+- **Two quest names were swapped** (`lichii/hook/coop_quests.cpp`; research sub-agent). The quest Enums are named `Step_<challenge>`: `Step_SageOfSpirit` is 0x19189e9d and `Step_SageOfWater` is 0x560a64af. The event flows' `ChallengeSystemActor` steps agree. All four branched quests get `Complete` from `Dm_SY_BancChange_EscapeDungeon`. Only the names in the log change: both were shared by their end already.
+- **The Ocarina at the puppet, measured: not conclusive** (run `oc1`). The host recorded its game's output (`NX2NAVI_AUDIO_DUMP`) while the joiner played notes at 15 m in front and 5 m to the side. The host's log shows each note emitted on the game's `Ocarina` user and playing (`the Ocarina user now plays: Ocarina_A`, six notes).
+  - The level of each note could not be told from the field's music and wind, and the dump has no clock to place the notes in it. Only two of the five places were reached, because the joiner's script ran 30 s late.
+  - A gain and pan measure needs the earlier probe plugin (`launcher-test\sp-probe`), taught to emit on the Ocarina user. Nobody listened.
+- New test switches: `LICHII_COOP_TEST_NPC_COPY_FILE`, `OOT_COOP_DEBUG_ACTORS_DUMP`, `LICHII_COOP_NPC_COPY_TALK=1`, `LICHII_COOP_FLAG_READ_CACHE=0`, `LICHII_COOP_POSE_PLAYOUT=0`, `LICHII_COOP_POSE_SEND_BONES=<n>`.
+- New scripts in `launcher-test`: `tk9_run.sh` to `tk13_run.sh` (the exit Kokiri), `eq4_run.sh` (held items, side view), `oc1_run.sh` and `oc_audio.py` (the Ocarina's loudness), `prof.py`, `motion.py`, `cs_chain9.sh` to `cs_chain16.sh`.
 
 ## Build
 

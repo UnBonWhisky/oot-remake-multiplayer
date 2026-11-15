@@ -7,12 +7,13 @@
 #include "coop_talks.h"
 #include "coop/host/game_flags.hpp"
 
-TEST_CASE("talks: 402 HaveTalked_Special flags, sorted, each keyed by the hash of its name") {
+TEST_CASE("talks: 402 HaveTalked_Special flags and the exit Kokiri's first talk, sorted, keyed by the hash of their name") {
     const auto talks = CoopTalks::Talks();
-    CHECK(talks.size() == 402);
+    CHECK(talks.size() == 403);
     CHECK(std::is_sorted(talks.begin(), talks.end(), [](const auto& a, const auto& b) { return a.hash < b.hash; }));
     for (const auto& t : talks) {
-        CHECK(std::string(t.name).rfind("HaveTalked_Special.", 0) == 0);
+        CHECK((std::string(t.name).rfind("HaveTalked_Special.", 0) == 0 ||
+               std::string(t.name) == "Npc_Kokiri_007_Child_OcarinaFirst"));
         CHECK(coop::host::flag_hash(t.name) == t.hash);
     }
     // The owl's, already a shared story flag, is one of them.
@@ -23,7 +24,7 @@ TEST_CASE("talks: merged into the shared flags only when on") {
     std::optional<coop::host::SharedFlags> shared;
     CHECK(CoopTalks::Merge(shared, false) == 0);
     CHECK_FALSE(shared);
-    CHECK(CoopTalks::Merge(shared, true) == 402);
+    CHECK(CoopTalks::Merge(shared, true) == 403);
     REQUIRE(shared);
     CHECK(shared->contains(coop::host::FlagKey(0x992fb436u, std::uint16_t{0})));
     CHECK(CoopTalks::Merge(shared, true) == 0);  // no repeats

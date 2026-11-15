@@ -2,6 +2,7 @@
 // upstream.hpp: lichii/hook's co-op, unchanged, driven from NX2navi's plugin
 // interface. Modelled on hookshot/src/coop_hookshot.cpp.
 #include "upstream.hpp"
+#include "coop_frame_profile.h"
 
 #include <array>
 #include <atomic>
@@ -1182,6 +1183,26 @@ std::string StatusText() {
                   static_cast<double>(g_worst_us.exchange(0)) / 1000.0, static_cast<unsigned long long>(g_calls.load()),
                   g_broken ? " (a call was refused: none since)" : "");
     std::string line = text;
+    {
+        // Since the last status line only (the figures above are since the start, loads included).
+        static std::uint64_t last_frames = 0, last_us = 0, last_steps = 0, last_step_us = 0;
+        const std::uint64_t us = g_frame_us.load(), step_us = g_step_us.load();
+        const std::uint64_t df = frames - last_frames, ds = steps - last_steps;
+        std::snprintf(text, sizeof(text), ", since the last line %.3f ms a frame, %.3f ms a frame step",
+                      df != 0 ? static_cast<double>(us - last_us) / 1000.0 / static_cast<double>(df) : 0.0,
+                      ds != 0 ? static_cast<double>(step_us - last_step_us) / 1000.0 / static_cast<double>(ds) : 0.0);
+        line += text;
+        last_frames = frames, last_us = us, last_steps = steps, last_step_us = step_us;
+    }
+    // The hook's frame by part since the last status line (lichii/hook/coop_frame_profile.h), in ms a frame.
+    if (const CoopFrameProfile::Taken parts = CoopFrameProfile::Take(); parts.frames > 0) {
+        line += ", frame parts (ms):";
+        for (int i = 0; i < CoopFrameProfile::kCount; ++i) {
+            std::snprintf(text, sizeof(text), " %s %.3f", CoopFrameProfile::Name(i),
+                          static_cast<double>(parts.ns[i]) / 1e6 / static_cast<double>(parts.frames));
+            line += text;
+        }
+    }
     std::snprintf(text, sizeof(text),
                   ", sounds: %llu of our Link's heard%s, %llu played on puppets, %llu not in their set, %llu too "
                   "late; %llu red flashes",

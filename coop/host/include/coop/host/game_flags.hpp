@@ -9,6 +9,7 @@
 // (saved copy, save-file mask). Reads see a queued write that is not applied
 // yet, as the game's 0x20fd90 does.
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -120,6 +121,20 @@ class GameFlagStore final : public FlagStore {
 
  private:
   WritableGameMemory& memory_;
+  // The read cache (set_flag_read_cache, off unless a build turns it on: the NX2navi port): what the reads of
+  // one store share. A store lives one frame, so this does too: the manager, each table's header and its
+  // write queue are read once, then each flag costs one read of its value instead of a dozen. Any write of
+  // ours drops it.
+  struct Frame;
+  std::shared_ptr<Frame> frame_;
+  std::optional<std::optional<protocol::FlagEntry>> cached_read(FlagKey key);
 };
+
+// The read cache, for every GameFlagStore from now on (off by default; the NX2navi port turns it on). With it, a
+// flag's place in the game's tables (an index, never a pointer) is kept from frame to
+// frame on the reading thread, checked against the tables' pointers and sizes at every frame's first read.
+// drop_flag_read_cache drops it all (a load, a scene change); the next read finds each place again.
+void set_flag_read_cache(bool on);
+void drop_flag_read_cache();
 
 }  // namespace coop::host

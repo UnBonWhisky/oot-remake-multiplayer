@@ -154,6 +154,128 @@ void Track::Push(Pose pose, std::uint64_t now_ms) {
     newest_ms_ = now_ms;
 }
 
+std::size_t SendBones() {
+    static const std::size_t n = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_SEND_BONES");
+        const long v = e != nullptr ? std::atol(e) : 0;
+        return v > 0 ? std::min<std::size_t>(static_cast<std::size_t>(v), kMaxBones) : kMaxSendBones;
+    }();
+    return n;
+}
+
+std::uint64_t PlayoutMs() {
+    static const std::uint64_t ms = [] {
+        const char* e = std::getenv("LICHII_COOP_POSE_PLAYOUT");
+        return e != nullptr && e[0] == '0' && e[1] == 0 ? std::uint64_t{0} : kPlayoutMs;
+    }();
+    return ms;
+}
+
+Pose Blend(const Pose& a, const Pose& b, float t) {
+    Pose out;
+    out.skeleton = b.skeleton;
+    out.bones.reserve(std::max(a.bones.size(), b.bones.size()));
+    std::size_t i = 0, j = 0;
+    while (i < a.bones.size() || j < b.bones.size()) {
+        if (j == b.bones.size() || (i < a.bones.size() && a.bones[i].bone < b.bones[j].bone)) {
+            out.bones.push_back(a.bones[i++]);
+        } else if (i == a.bones.size() || b.bones[j].bone < a.bones[i].bone) {
+            out.bones.push_back(b.bones[j++]);
+        } else {
+            const BonePose& o = a.bones[i++];
+            BonePose n = b.bones[j++];
+            if (n.rotation && o.rotation) n.rotation = Nlerp(*o.rotation, *n.rotation, t);
+            if (n.translation && o.translation) n.translation = Lerp(*o.translation, *n.translation, t);
+            if (n.scale && o.scale) n.scale = Lerp(*o.scale, *n.scale, t);
+            if (t < 0.5f) n.flags = o.flags;
+            out.bones.push_back(std::move(n));
+        }
+    }
+    return out;
+}
+
+void Track::PushSent(Pose pose, std::uint64_t sent_ms, std::uint64_t now_ms) {
+    lags_.push_back(static_cast<std::int64_t>(now_ms) - static_cast<std::int64_t>(sent_ms));
+    if (lags_.size() > kPlayoutLags) lags_.erase(lags_.begin());
+    // In sent order; one sent at the same time as a kept one replaces it.
+    auto at = std::find_if(kept_.begin(), kept_.end(), [&](const Stamped& k) { return k.sent_ms >= sent_ms; });
+    if (at != kept_.end() && at->sent_ms == sent_ms) {
+        at->pose = pose;
+    } else {
+        kept_.insert(at, Stamped{pose, sent_ms});
+    }
+    while (kept_.size() > kPlayoutKeep) kept_.erase(kept_.begin());
+    if (!kept_.empty() && kept_.back().sent_ms == sent_ms) {
+        newest_ = std::move(pose);  // Fill and Drives see the newest, as with Push
+        newest_ms_ = now_ms;
+    }
+}
+
+std::optional<Pose> Track::PlayAt(std::uint64_t now_ms, std::uint64_t delay_ms) const {
+    if (kept_.empty()) return newest_;
+    // The sender's clock now, as the quickest arrival lately says (the least lag is the clocks' offset).
+    const std::int64_t offset = *std::min_element(lags_.begin(), lags_.end());
+    const std::int64_t target =
+        static_cast<std::int64_t>(now_ms) - offset - static_cast<std::int64_t>(delay_ms);
+    if (target <= static_cast<std::int64_t>(kept_.front().sent_ms)) return kept_.front().pose;
+    for (std::size_t i = 1; i < kept_.size(); ++i) {
+        const auto b = static_cast<std::int64_t>(kept_[i].sent_ms);
+        if (target < b) {
+            const auto a = static_cast<std::int64_t>(kept_[i - 1].sent_ms);
+            const float t = b > a ? static_cast<float>(target - a) / static_cast<float>(b - a) : 1.0f;
+            return Blend(kept_[i - 1].pose, kept_[i].pose, t);
+        }
+    }
+    return kept_.back().pose;  // behind: the newest held, never guessed ahead
+}
+
+double Turned(const Pose& before, const Pose& now) {
+    double sum = 0.0;
+    std::size_t i = 0, j = 0;
+    while (i < before.bones.size() && j < now.bones.size()) {
+        const BonePose& a = before.bones[i];
+        const BonePose& b = now.bones[j];
+        if (a.bone < b.bone) {
+            ++i;
+        } else if (b.bone < a.bone) {
+            ++j;
+        } else {
+            if (a.rotation && b.rotation) {
+                double d = 0.0;
+                for (std::size_t k = 0; k < 4; ++k) d += static_cast<double>((*a.rotation)[k]) * (*b.rotation)[k];
+                d = std::min(1.0, std::fabs(d));
+                sum += 2.0 * std::acos(d) * 57.29577951308232;
+            }
+            ++i;
+            ++j;
+        }
+    }
+    return sum;
+}
+
+void Motion::Add(const Pose& pose) {
+    if (last && last->skeleton == pose.skeleton) {
+        const double v = Turned(*last, pose);
+        v_sum += v;
+        if (last_v >= 0.0) jerk_sum += std::fabs(v - last_v);
+        if (v < 0.05) ++still;  // under float noise of one quaternion read twice
+        ++frames;
+        last_v = v;
+    } else {
+        last_v = -1.0;
+    }
+    last = pose;
+}
+
+std::string Motion::Take() {
+    char text[96];
+    std::snprintf(text, sizeof(text), "v %.2f jerk %.2f still %u/%u",
+                  frames ? v_sum / frames : 0.0, frames > 1 ? jerk_sum / (frames - 1) : 0.0, still, frames);
+    v_sum = jerk_sum = 0.0;
+    frames = still = 0;
+    return text;
+}
+
 Pose Track::Fill(Pose pose) const {
     if (!newest_ || newest_->skeleton != pose.skeleton) return pose;
     std::vector<BonePose> merged;
@@ -443,6 +565,10 @@ struct State {
     // band and seed, the bow's string.
     std::vector<Pose> pieces_outbox;
     std::uint32_t outbox_serial = 0;
+    std::uint64_t outbox_ms = 0;  // when the outbox was read (playout: its stamp)
+    // LICHII_COOP_DEBUG_POSE: smoothness of our own Link's pose and of each puppet's written pose.
+    Motion ours_motion;
+    std::array<Motion, std::size_t{proto::kMaxPlayers} + 1> puppet_motion;
     std::uint32_t sent_serial = 0;
     std::uint64_t last_send_ms = 0;
     std::uint32_t sequence = 0;
@@ -655,7 +781,7 @@ namespace {
 // no pose of its skeleton has come.
 enum class Wrote { none, written, refused };
 Wrote WriteFor(State& s, CoopPuppet::Guest& guest, std::uint8_t number, std::uint64_t actor,
-               std::uint64_t now_ms) {
+               std::uint64_t now_ms, Motion* motion = nullptr) {
     const auto skel = FindSkeleton(guest, actor);
     if (!skel) return Wrote::none;
     const std::uint32_t id = SkeletonId(skel->count, skel->model);
@@ -671,9 +797,12 @@ Wrote WriteFor(State& s, CoopPuppet::Guest& guest, std::uint8_t number, std::uin
         }
     } else {
         const auto& tracks = s.tracks[number];
-        if (const auto it = tracks.find(id); it != tracks.end()) pose = it->second.At(now_ms);
+        if (const auto it = tracks.find(id); it != tracks.end()) {
+            pose = PlayoutMs() != 0 ? it->second.PlayAt(now_ms, PlayoutMs()) : it->second.At(now_ms);
+        }
     }
     if (!pose) return Wrote::none;
+    if (motion != nullptr && s.debug) motion->Add(*pose);
     return WritePose(s, guest, actor, *pose) ? Wrote::written : Wrote::refused;
 }
 
@@ -704,11 +833,14 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
                 }
             }
             ++s.outbox_serial;
+            s.outbox_ms = now_ms;
+            if (s.debug) s.ours_motion.Add(*s.outbox);
         }
     }
     for (const auto& [number, actor] : puppets) {
         if (actor == 0 || number >= s.tracks.size()) continue;
-        const Wrote body = WriteFor(s, guest, number, actor, now_ms);
+        const Wrote body = WriteFor(s, guest, number, actor, now_ms,
+                                    number < s.puppet_motion.size() ? &s.puppet_motion[number] : nullptr);
         if (body == Wrote::written) {
             ++s.written;
         } else if (body == Wrote::refused ||
@@ -733,6 +865,13 @@ void OnCalcFrame(CoopPuppet::Guest& guest, std::uint64_t main_base,
         std::string facing = "; yaw ours " + YawText(guest, player);
         for (const auto& [number, actor] : puppets) {
             facing += ", P" + std::to_string(number) + " " + YawText(guest, actor);
+        }
+        // Smoothness (degrees of bone turn a game frame): ours as read, each puppet as written.
+        facing += "; motion ours " + s.ours_motion.Take();
+        for (const auto& [number, actor] : puppets) {
+            if (number < s.puppet_motion.size()) {
+                facing += ", P" + std::to_string(number) + " " + s.puppet_motion[number].Take();
+            }
         }
         Say(s, (s.local_model.empty() ? std::string("?") : s.local_model) + " " +
                    std::to_string(s.first.size()) + " bones, " + std::to_string(s.last_size) +
@@ -773,17 +912,21 @@ std::vector<proto::PlayerPose> TakeOutgoing(std::uint64_t server_now_us, std::ui
     State& s = S();
     std::lock_guard lock(s.mutex);
     if (!s.outbox || s.outbox_serial == s.sent_serial ||
-        now_ms - s.last_send_ms < 1000 / kSendHz) {
+        now_ms - s.last_send_ms + (PlayoutMs() != 0 ? kSendEarlyMs : 0) < 1000 / kSendHz) {
         return out;
     }
     s.sent_serial = s.outbox_serial;
     s.last_send_ms = now_ms;
     proto::PlayerPose body;
-    body.time = {server_now_us, ++s.sequence};
+    // Playout: stamped with when the bones were read, not when they go.
+    const std::uint64_t read_us =
+        PlayoutMs() != 0 ? server_now_us - std::min<std::uint64_t>(server_now_us, (now_ms - std::min(now_ms, s.outbox_ms)) * 1000)
+                        : server_now_us;
+    body.time = {read_us, ++s.sequence};
     body.skeleton = s.outbox->skeleton;
     // Sent even with no bone changed: the receiver keeps its puppet's pose
     // fresh (Drives) and its blend interval right.
-    body.bones = s.picker.Pick(body.skeleton, Encode(*s.outbox), now_ms);
+    body.bones = s.picker.Pick(body.skeleton, Encode(*s.outbox), now_ms, SendBones());
     out.push_back(std::move(body));
     ++s.sent;
     // Each piece in our hands as a pose of its own skeleton: when it changed,
@@ -838,7 +981,11 @@ void Receive(const proto::PlayerPose& m, std::uint64_t now_ms) {
     if (m.player_number == 0 || m.player_number >= s.tracks.size()) return;
     auto& tracks = s.tracks[m.player_number];
     auto& track = tracks[m.skeleton];
-    track.Push(track.Fill(std::move(pose)), now_ms);
+    if (PlayoutMs() != 0 && m.time.server_time_us != 0) {
+        track.PushSent(track.Fill(std::move(pose)), m.time.server_time_us / 1000, now_ms);
+    } else {
+        track.Push(track.Fill(std::move(pose)), now_ms);
+    }
     // Skeletons not heard from for a while (a piece put away, the other age).
     std::erase_if(tracks, [&](const auto& kv) {
         return now_ms - std::min(now_ms, kv.second.last_ms()) > kTrackForgetMs;

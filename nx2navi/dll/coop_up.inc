@@ -431,6 +431,8 @@ private:
         for (const std::uint8_t player : talk->TakeRefusals()) {
             CoopNx2navi::Overlay::Banner(CoopNx2navi::TalkLock::Refusal(Name(player), CoopNx2navi::Ui::French()));
         }
+        // NPC copies another player talks to get none of its animations meanwhile (coop_objects.h).
+        CoopObjects::SetTalkedNpcs(talk->Others(now));
         const auto notes = talk->TakeSends(now);
         if (connected && !notes.empty()) {
             session.with_client([&](coop::net::Client& client) {

@@ -12,6 +12,7 @@
 // view_mutex. OnFrame never holds two at once.
 
 #include "coop_hook.h"
+#include "coop_frame_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -400,9 +401,27 @@ public:
     }
 
     void Frame(Core::System& system) {
+        CoopFrameProfile::Lap lap;  // coop_frame_profile.h: nothing unless the build asks for it
         FrameView view;
         view.at = Clock::now();
         const auto reading = Read(system, view);
+#if defined(COOP_FLAG_READ_CACHE) && COOP_FLAG_READ_CACHE
+        // A build with the flag read cache (coop/host/game_flags.hpp): on, unless
+        // LICHII_COOP_FLAG_READ_CACHE=0 (for comparing).
+        static const bool flag_cache_on = [] {
+            const char* e = std::getenv("LICHII_COOP_FLAG_READ_CACHE");
+            const bool on = e == nullptr || std::string_view(e) != "0";
+            coop::host::set_flag_read_cache(on);
+            return on;
+        }();
+        (void)flag_cache_on;
+#endif
+        // With the flag read cache: the flags' places are found again after a load or a scene change.
+        if (!reading || view.scene != flag_cache_scene_) {
+            coop::host::drop_flag_read_cache();
+            flag_cache_scene_ = view.scene;
+        }
+        lap.Mark(CoopFrameProfile::kRead);
 
         // The game's flags, when it is the right game and a list is shared.
         std::optional<EmulatorMemory> memory;
@@ -544,7 +563,9 @@ public:
         if (memory) {  // docs/flags.md, "Saves": no scene for a while is the title screen
             session_->set_scene_readable(coop::host::PlayerReader(*memory).read_scene().has_value());
         }
+        lap.Mark(CoopFrameProfile::kFlags);
         const auto report = session_->frame(reading, hold ? &*hold : nullptr);
+        lap.Mark(CoopFrameProfile::kSession);
         if (quests) {
             for (const auto& r : quests->take_raised()) {
                 LOG_INFO(Core, "coop: quests: {} {} -> {} (shared Threads of Time; issue 193)", r.quest,
@@ -675,6 +696,7 @@ public:
                          ? "room gimmick flags from another player held until we leave this dungeon or load"
                          : "no room gimmick flags held");
         }
+        lap.Mark(CoopFrameProfile::kEvents);
         // Chat notices (docs/setup.md): what another player's change gave us.
         if (notify_ && !report.received.empty()) {
             std::uint8_t self = 0;
@@ -806,6 +828,7 @@ public:
         // Issue 144: changes from the others to actors near our Link wait while
         // our Link is in an event (a talk, a cutscene).
         CoopObjects::SetLocalEvent(reading && reading->event_running.value_or(false));
+        lap.Mark(CoopFrameProfile::kNotices);
         // Our own event hides the others (puppet, Navi, marker); playing the
         // Ocarina does not (coop/host/scene.hpp, local_event_hides).
         const bool event =
@@ -855,9 +878,12 @@ public:
                         view.scene, event, view.position,
                         reading ? reading->rotation : std::nullopt,
                         reading ? reading->animation : std::nullopt, report.server_now_us);
+        lap.Mark(CoopFrameProfile::kPuppet);
         CoopObjects::Share(system, report.connected ? session_.get() : nullptr, view.scene,
                            report.server_now_us);
+        lap.Mark(CoopFrameProfile::kObjects);
         CoopHud::Frame(report.connected ? session_.get() : nullptr);  // our hearts (PLAYER_LIFE)
+        lap.Mark(CoopFrameProfile::kHud);
         CoopSpawn::Frame(system, report.connected ? session_.get() : nullptr, view.scene, report.server_now_us);
         CoopDrops::Frame(system, report.connected ? session_.get() : nullptr, view.scene, report.server_now_us);
         if (!reading) CoopTime::Loading(report.server_now_us);  // issue 159: a reload, a death
@@ -866,6 +892,7 @@ public:
                         reading && reading->event_running.value_or(false));  // issue 192: no nudge in a cutscene
         // Boss rooms together (docs/dungeons-boss.md). Issue 148: the room's
         // "shut in" flag says when we are past its door.
+        lap.Mark(CoopFrameProfile::kSpawn);
         std::optional<bool> boss_shut_in;
         if (memory && view.scene) {
             if (const CoopBoss::Room* room = CoopBoss::RoomOfScene(*view.scene)) {
@@ -885,7 +912,9 @@ public:
                         report.connected ? session_.get() : nullptr, report.server_now_us);
         // /teleport <player> (docs/setup.md "Chat commands"), after the boss
         // rooms: it reads whether our boss fight runs.
+        lap.Mark(CoopFrameProfile::kBoss);
         CoopTeleport::Frame(system, view.game ? base_ : 0, reading, report.connected ? session_.get() : nullptr);
+        lap.Mark(CoopFrameProfile::kPort);
         // LICHII_COOP_SCENE_PROBE=1 only (docs/scenes.md "Free-play scene change").
         CoopSceneProbe::Frame(system, view.game ? base_ : 0, reading);
         for (auto& line : CoopTeleport::TakeLines()) {
@@ -898,7 +927,10 @@ public:
         for (auto& line : CoopPvp::TakeLines()) {
             chat_.Add(std::move(line), true);
         }
+        lap.Mark(CoopFrameProfile::kPvp);
         Place(view);
+        lap.Mark(CoopFrameProfile::kPlace);
+        lap.Frame();
 
         std::lock_guard lock(view_mutex_);
         frame_ = std::move(view);
@@ -1618,6 +1650,7 @@ private:
     std::unordered_map<std::string, std::uint64_t> played_seen_;  // shared scene -> when its flag was first seen set
 #endif
     CoopLiveEvents::StartWatch story_watch_;  // our own story cutscene starts
+    std::optional<std::string> flag_cache_scene_;  // the scene the flag read cache was filled in
     std::vector<coop::protocol::DungeonEvent> story_events_in_;  // under dungeon_events_mutex_  // deku-dungeon-2: our own gimmick event starts
     std::mutex dungeon_events_mutex_;         // DUNGEON_EVENT from the network thread
     std::vector<coop::protocol::DungeonEvent> dungeon_events_in_;
@@ -2104,8 +2137,10 @@ void Start() {
 }
 
 void OnFrame(Core::System& system) {
+    CoopFrameProfile::Lap lap;
     CoopObjects::OnFrame(system);
     CoopTestInput::OnFrame(system);
+    lap.Mark(CoopFrameProfile::kObjectsPre);
     Start();
     // g_coop only changes in Start (before this), End (which keeps the old
     // one alive until Shutdown) and Shutdown (after

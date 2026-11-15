@@ -1413,6 +1413,16 @@ void Director::Status(Guest& guest, std::uint64_t now_ms) {
 Gear GearOf(const coop::protocol::Equipment& e) {
     Gear gear{e.weapon, e.shield,     e.head,         e.armor, e.boots,   e.held,
               e.hand,   e.sub_weapon, e.third_weapon, e.tool,  e.sub_tool};
+#if defined(LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT) && LICHII_COOP_PUPPET_NO_HELD_HOOKSHOT
+    // A puppet given the Hookshot or Longshot in hand crashed its game at once (NX2navi run eq4: an access
+    // violation reading 0x7d8 in main+0x2e37c30, 60 ms after "wears held 'Weapon_Range_Hookshot'"): the piece
+    // asks its wearer for a part the puppet does not have. It is not put in the puppet's hand.
+    for (auto& piece : gear) {
+        if (piece && (piece->starts_with("Weapon_Range_Hookshot") || piece->starts_with("Weapon_Range_Longshot"))) {
+            piece.reset();
+        }
+    }
+#endif
     // The Ocarina and its belt holder (issue 152): "Item_Ocarina_Fairy" and
     // "Item_Ocarina_Fairy_Holder" (or _Time); none while the player has none.
     if (e.ocarina && e.ocarina->starts_with("Item_Ocarina_")) {

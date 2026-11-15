@@ -224,6 +224,9 @@ constexpr Talk kTalks[] = {
     {0x829e757bu, "HaveTalked_Special.Npc_Kokiri_011_Adult_BossBattle_PhantomGanon_IsCompleted_Exp_Talk_Event7"},
     {0x835109e9u, "HaveTalked_Special.Npc_Hylia_Zelda_Adult_FinalBattleField_BeforeGanonAppear_Talk_Event16"},
     {0x83eb1477u, "HaveTalked_Special.Npc_Goron_007_Child_Talk_Event4"},
+    // Not a HaveTalked_Special member: the exit Kokiri's own "talked once" Bool (his flow sets it on the
+    // first talk and greets with Talk_115 after it; GameDataList: saved Bool, SaveFileIndex 0).
+    {0x83fd30dcu, "Npc_Kokiri_007_Child_OcarinaFirst"},
     {0x841c3d99u, "HaveTalked_Special.Npc_Kokiri_008_Child_GameStarted_Talk_Event44"},
     {0x8474fe3du, "HaveTalked_Special.Npc_Kokiri_011_Child_Talk_Event57"},
     {0x85219486u, "HaveTalked_Special.Npc_Hylia_Ingo_001_Adult_Talk_Event3"},

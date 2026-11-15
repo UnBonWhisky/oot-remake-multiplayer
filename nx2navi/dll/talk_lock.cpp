@@ -117,6 +117,20 @@ void Lock::Remote(std::uint8_t player, const Note& n, std::uint64_t now_us) {
     }
 }
 
+std::vector<std::uint64_t> Lock::Others(std::uint64_t now_us) const {
+    std::lock_guard lock(mutex_);
+    std::vector<std::uint64_t> out;
+    for (const auto& [hash, players] : remote_) {
+        for (const auto& [player, until] : players) {
+            if (until > now_us) {
+                out.push_back(hash);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
 std::vector<Note> Lock::TakeSends(std::uint64_t now_us) {
     std::lock_guard lock(mutex_);
     std::vector<Note> out;

@@ -372,3 +372,48 @@ TEST_CASE("game flags: a String64Array element read and written at once (the own
   CHECK_FALSE(GameFlags::set_string64_array_now(w, 0x7bde80e9u, 0, std::string(64, 'a')));
   CHECK(flags.find_type(0x7bde80e9u) == 17);
 }
+
+TEST_CASE("game flag store: the read cache reads what the plain path reads, and follows the queues") {
+  struct On {
+    On() { coop::host::set_flag_read_cache(true); coop::host::drop_flag_read_cache(); }
+    ~On() { coop::host::set_flag_read_cache(false); coop::host::drop_flag_read_cache(); }
+  } on;
+  auto w = game();
+  w.mem.put_u8(kBoolEntries + 0x18 + 0x16, 1);
+  w.mem.put_u32(kIntEntries + 0x1c, 3);
+  w.mem.put_u8(kKeys + 16 * 2 + 0xc, 1);
+  const auto chest = protocol::FlagKey::key64_flag(0x8c44828386468bfull);
+  {
+    GameFlagStore store(w);  // one frame
+    CHECK(store.read({0x11, 0}) == protocol::FlagEntry{0x11, 0, protocol::FlagKind::boolean, 0});
+    CHECK(store.read({0x18, 0}) == protocol::FlagEntry{0x18, 0, protocol::FlagKind::boolean, 1});
+    CHECK(store.read({0x22, 0}) == protocol::FlagEntry{0x22, 0, protocol::FlagKind::int32, 3});
+    CHECK(store.read({0x33, 35}) == protocol::FlagEntry{0x33, 35, protocol::FlagKind::boolean, 1});
+    CHECK_FALSE(store.read({0x25, 0}));
+    CHECK(store.read(chest) == protocol::FlagEntry{chest, protocol::FlagKind::boolean, 1});
+    CHECK_FALSE(store.read(protocol::FlagKey::key64_flag(6)));
+    // Our own write: read back at once (the view is dropped).
+    CHECK(store.write({0x11, 0, protocol::FlagKind::boolean, 1}));
+    CHECK(store.read({0x11, 0})->value == 1);
+    CHECK(store.write({0x22, 0, protocol::FlagKind::int32, 9}));
+    CHECK(store.read({0x22, 0})->value == 9);
+  }
+  // The next frame: the game applied nothing yet, and queued a value of its own; places are kept.
+  REQUIRE(GameFlags::set_bool(w, 0x18, false));
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 0);
+    CHECK(store.read({0x11, 0})->value == 1);
+    CHECK(store.read({0x22, 0})->value == 9);
+  }
+  // A table rebuilt elsewhere (another count): its places are found again.
+  table(w.mem, 0x10, kBoolEntries + 0x1000, kBoolSlots + 0x1000, 0x18, {0x18, 0x11, 0x19});
+  w.mem.put_u32(kMgr + 0x40, 0x40000000);  // the queue applied (a new round, nothing taken)
+  w.mem.put_u8(kBoolEntries + 0x1000 + 0x16, 1);  // 0x18 is entry 0 now, true
+  {
+    GameFlagStore store(w);
+    CHECK(store.read({0x18, 0})->value == 1);
+    CHECK(store.read({0x11, 0})->value == 0);
+    CHECK(store.read({0x19, 0}) == protocol::FlagEntry{0x19, 0, protocol::FlagKind::boolean, 0});
+  }
+}

@@ -68,6 +68,13 @@ void HurtOurLink(std::int32_t quarters, const std::array<float, 3>& at,
 // issue 144).
 void SetLocalEvent(bool in_event);
 
+// Any thread: the NPCs (placement hashes) another player talks to now. In a build that defines
+// LICHII_COOP_NPC_COPY_NO_TALK=1 (the NX2navi port, which knows each player's talk), our copy of such an NPC
+// is given none of its owner's animations while that talk lasts: in the NX2navi runs tk8, tk9 and tk11 the
+// exit Kokiri's copy left the game's actor list within a second of being given the owner's talk-start 'Wait'
+// (and 'Talk'), and with no plays at all during the owner's talk (run tk10) it stayed. Other builds ignore it.
+void SetTalkedNpcs(std::vector<std::uint64_t> hashes);
+
 // Network thread, from the session's on_event: takes the object messages.
 void OnEvent(const coop::net::Event& event);
 

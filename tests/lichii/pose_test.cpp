@@ -553,3 +553,72 @@ TEST_CASE("pose: with every limb moving fast, a still bone is still sent within 
     MESSAGE("longest a bone went unsent: " << worst << " ms (bound " << bound << ")");
     CHECK(worst <= bound);
 }
+
+namespace {
+CoopPose::Pose OneBone(float angle_deg, std::uint16_t bone = 3) {
+    const float h = angle_deg * 3.14159265f / 360.0f;
+    CoopPose::Pose p;
+    p.skeleton = 0x77;
+    CoopPose::BonePose b;
+    b.bone = bone;
+    b.rotation = CoopPose::Quat{0.0f, std::sin(h), 0.0f, std::cos(h)};
+    p.bones.push_back(b);
+    return p;
+}
+}  // namespace
+
+TEST_CASE("pose playout: shows the pose of the delay ago by the sender's clock, whatever the arrival jitter") {
+    CoopPose::Track track;
+    // Sent every 33 ms at angles 0, 10, 20, ...; arrivals 100 ms later with 0 to 25 ms of jitter.
+    const int jitter[] = {0, 25, 3, 18, 0, 22, 9, 1, 24, 5};
+    for (int i = 0; i < 10; ++i) {
+        track.PushSent(OneBone(10.0f * i), 1000 + 33u * i, 1100 + 33u * i + jitter[i]);
+    }
+    // Offset = least lag = 100 ms. At local 1366 with a 50 ms delay: sender 1216 = between sends 6 (1198)
+    // and 7 (1231), 18/33 of the way: 60 + 5.45 degrees.
+    const auto shown = track.PlayAt(1366, 50);
+    REQUIRE(shown);
+    REQUIRE(shown->bones.size() == 1);
+    const double angle = 2.0 * std::asin((*shown->bones[0].rotation)[1]) * 57.2957795;
+    CHECK(angle == doctest::Approx(65.45).epsilon(0.01));
+    // Behind everything: the newest, held; before everything: the oldest.
+    CHECK(CoopPose::Turned(*track.PlayAt(5000, 50), OneBone(90.0f)) < 0.05);
+    CHECK(CoopPose::Turned(*track.PlayAt(900, 50), OneBone(0.0f)) < 0.05);
+}
+
+TEST_CASE("pose playout: a pose that arrives late goes in its place, one sent twice replaces the first") {
+    CoopPose::Track track;
+    track.PushSent(OneBone(0.0f), 1000, 1100);
+    track.PushSent(OneBone(20.0f), 1066, 1166);
+    track.PushSent(OneBone(10.0f), 1033, 1170);  // late
+    track.PushSent(OneBone(12.0f), 1033, 1171);  // the same send again
+    CHECK(track.Kept() == 3);
+    const auto mid = track.PlayAt(1133 + 50, 50);  // sender 1033: the late one
+    CHECK(CoopPose::Turned(*mid, OneBone(12.0f)) < 0.05);
+    // The newest by sent time stays what Fill builds on.
+    CHECK(CoopPose::Turned(track.Fill(OneBone(20.0f, 9)), OneBone(20.0f)) < 0.05);
+}
+
+TEST_CASE("pose blend: bones in one pose only are kept, shared ones blended") {
+    CoopPose::Pose a = OneBone(0.0f, 2);
+    a.bones.push_back(OneBone(0.0f, 5).bones[0]);
+    CoopPose::Pose b = OneBone(40.0f, 5);
+    b.bones.push_back(OneBone(40.0f, 7).bones[0]);
+    const auto m = CoopPose::Blend(a, b, 0.5f);
+    REQUIRE(m.bones.size() == 3);
+    CHECK(m.bones[0].bone == 2);
+    CHECK(m.bones[1].bone == 5);
+    CHECK(m.bones[2].bone == 7);
+    CHECK(CoopPose::Turned(OneBone(20.0f, 5), m) < 0.05);
+}
+
+TEST_CASE("pose motion: steady turning has no jerk, a held frame and a catch-up have") {
+    CoopPose::Motion steady, stuttering;
+    for (int i = 0; i < 10; ++i) steady.Add(OneBone(5.0f * i));
+    const float stutter[] = {0, 5, 10, 10, 20, 25, 30, 30, 40, 45};
+    for (const float a : stutter) stuttering.Add(OneBone(a));
+    CHECK(steady.Take().find("jerk 0.00 still 0/9") != std::string::npos);
+    const std::string s = stuttering.Take();
+    CHECK(s.find("still 2/9") != std::string::npos);
+    CHECK(s.find("jerk 0.00") == std::string::npos);
+}
