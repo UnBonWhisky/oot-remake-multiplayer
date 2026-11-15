@@ -42,14 +42,16 @@ inline constexpr std::uint64_t kHandles = 0x100;
 inline constexpr std::uint64_t kBlock = 0x200;
 inline constexpr std::uint64_t kHoldMs = 4000;  // a note held longer than any song's with no word is let go
 
-// Since 2026-11-15 (run sp-oc1 and a research sub-agent reading the lifted code): an emit on the `Ocarina` user
-// gets no audio voice at all (the probe saw none in 1.2 s, near or far, performer kept or not): the game uses that
-// user only for whole melodies. Our own Link's single notes are played by the game's 2D sound player:
-// main+0xa44760(args) with args (0x28 bytes) = {+0 u8 0, +8 char* name, +0x10 u64 0, +0x18 float fade-in 0,
-// +0x1c float volume 1, +0x20 u32 0, +0x24 u32 ~0}; it returns a pooled sound object, valid while its u32 at +0x10
-// is the id it had at the start; its volume is the float at +0x64; main+0x3a49ea0(object) stops it. That player
-// has no 3D position, so the note's loudness is set here from the distance between the friend's puppet and our
-// Link (Gain), each frame while it sounds, and a note beyond kHearM is not played. No pan.
+// Since 2026-11-15 (runs sp-oc1 to sp-oc4 and two research sub-agents reading the lifted code): the emit on the
+// `Ocarina` user made no audio voice because that user's root matrix (module + kRootMatrix) was zero: the module's
+// update writes it (main+0x335aee0, the performer's head) only while our own Link performs. Writing the friend's
+// puppet there before the emit, and every frame step while the note sounds, gives a voice placed at the puppet: in
+// sp-oc4, at 3 m in front 0.61 / 0.62 to the two front speakers (our Link's own note 0.71 / 0.71, through the
+// game's 2D note player), 25 m 0.12, 4 m to the right 0.28 / 0.93, to the left 0.95 / 0.31, 60 m 0.02. A note of a
+// puppet kHearM or more away is not played. The game's 2D note player (main+0xa44760, kStartNote, ...) started no
+// voice when called for another player (sp-oc3); its addresses are kept for the record.
+inline constexpr std::uint64_t kRootMatrix = 0xb0;  // 3 rows of 4 floats, the place in the 4th column
+inline constexpr float kHeadUp = 1.3f;              // metres from a puppet's feet to its head, about
 inline constexpr std::uint64_t kStartNote = 0xa44760;
 inline constexpr std::uint64_t kStopNote = 0x3a49ea0;
 inline constexpr std::uint64_t kNoteId = 0x10;
